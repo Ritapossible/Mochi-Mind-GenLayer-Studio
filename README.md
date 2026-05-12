@@ -90,7 +90,7 @@ Each Mochi evolution changes:
 - emotional appearance
 
 Stages include:
-- Sakura Mochi
+- Sunrise Mochi
 - Toxic Mochi
 - Cosmic Mochi
 - Forest Mochi
@@ -150,7 +150,7 @@ The game is designed to:
 
 ## Explorer
 
-[GenLayer Studio Explorer Contract](https://explorer-studio.genlayer.com/address/0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee?utm_source=chatgpt.com)
+[GenLayer Studio Explorer Contract](https://explorer-studio.genlayer.com/address/0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee)
 
 ---
 
@@ -196,8 +196,8 @@ Built using:
 
 Learn more about GenLayer:
 
-- [GenLayer Official Website](https://www.genlayer.com/?utm_source=chatgpt.com)
-- [GenLayer Studio Docs](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio?utm_source=chatgpt.com)
+- [GenLayer Official Website](https://www.genlayer.com/)
+- [GenLayer Studio Docs](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio)
 
 ---
 
@@ -235,7 +235,7 @@ Deploy through:
 - GenLayer Studio
 
 Reference:
-- [Deploying Contracts in GenLayer Studio](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio/loading-contract?utm_source=chatgpt.com)
+- [Deploying Contracts in GenLayer Studio](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio/loading-contract)
 
 ---
 
@@ -267,7 +267,7 @@ returns the final validator decision.
 ## Clone Repository
 
 ```bash
-git clone https://github.com/defiplusacademy24-art/Mochi_mind_V2.git
+git clone https://github.com/Ritapossible/Mochi-Mind-GenLayer-Studio.git
 ```
 
 ---
@@ -381,8 +381,6 @@ This includes:
 
 # Screenshots
 
-_Add screenshots here_
-
 ```md
 ![Landing Page](./screenshots/landing.png)
 ![Gameplay](./screenshots/gameplay.png)
@@ -406,8 +404,8 @@ MochiMind is inspired by GenLayer’s vision for:
 Built for the GenLayer Mini-Games ecosystem.
 
 Powered by:
-- [GenLayer](https://www.genlayer.com/?utm_source=chatgpt.com)
-- [GenLayer Studio](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio?utm_source=chatgpt.com)
+- [GenLayer](https://www.genlayer.com/)
+- [GenLayer Studio](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio)
 
 ---
 
@@ -419,8 +417,8 @@ MIT License
 
 # Author
 
-Augustine Rita
+RitaCryptoTips
 
 X:
-[@RitaCryptoTips](https://x.com/RitaCryptoTips?utm_source=chatgpt.com)
+[@RitaCryptoTips](https://x.com/RitaCryptoTips)
 ````7
