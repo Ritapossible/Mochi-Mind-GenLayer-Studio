@@ -381,12 +381,11 @@ This includes:
 
 # Screenshots
 
-```md
-![Landing Page](.\screenshots\landingpage.png)
-![Gameplay](.\screenshots\gameplay.png)
-![Validator AI](.\screenshots\validator.png)
-```
+![Landing Page](./screenshots/landingpage.png)
 
+![Gameplay](./screenshots/gameplay.png)
+
+![Validator AI](./screenshots/validator.png)
 ---
 
 # Inspiration
