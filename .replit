@@ -1,0 +1,38 @@
+modules = ["nodejs-24", "python-3.11"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[[ports]]
+localPort = 22464
+externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+VITE_SPENDER_PRIVATE_KEY = ""
+VITE_STUDIO_CONTRACT = "0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee"
