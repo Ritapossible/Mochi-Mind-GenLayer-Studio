@@ -22,7 +22,7 @@
 
 import { createAccount, createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
-import { TransactionStatus } from "genlayer-js/types";
+import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
 
 const TOTAL_STAGES = 20;
 
@@ -84,12 +84,19 @@ async function main(): Promise<void> {
         value: 0n,
       });
 
-      await client.waitForTransactionReceipt({
+      const receipt = await client.waitForTransactionReceipt({
         hash: txHash,
         status: TransactionStatus.FINALIZED,
         interval: 3000,
         retries: 80,
       });
+
+      // Finalized can still mean reverted — an unregistered stage fails here.
+      if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
+        throw new Error(
+          "reverted on-chain (is the stage registered? run register-stages first)",
+        );
+      }
 
       const verdict = await client.readContract({
         address,

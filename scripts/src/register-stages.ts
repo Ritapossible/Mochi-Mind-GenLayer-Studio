@@ -19,7 +19,7 @@
 
 import { createAccount, createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
-import { TransactionStatus } from "genlayer-js/types";
+import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
 
 // Mirrors artifacts/mochi-mind/src/game/stages.ts. Kept as plain data so this
 // script has no dependency on the frontend build.
@@ -108,6 +108,30 @@ async function main(): Promise<void> {
   const account = createAccount(PRIVATE_KEY as `0x${string}`);
   const client = createClient({ chain: studionet, account });
 
+  // register_stages is owner-only. Signing with any other key reverts on-chain
+  // after the gas is spent, so check first and say so plainly.
+  const owner = String(
+    await client.readContract({
+      address: CONTRACT as `0x${string}`,
+      functionName: "get_owner",
+      args: [],
+    }),
+  );
+  const signer = String(account.address);
+
+  console.log(`\nSigning as: ${signer}`);
+  console.log(`Owner:      ${owner}`);
+
+  if (signer.toLowerCase() !== owner.toLowerCase()) {
+    console.error(
+      `\nGENLAYER_PRIVATE_KEY belongs to ${signer}, but the contract owner is\n` +
+        `${owner}. register_stages is owner-only, so this would revert.\n\n` +
+        `Use the key of the account that deployed the contract, or have the\n` +
+        `current owner call transfer_ownership.`,
+    );
+    process.exit(1);
+  }
+
   console.log(`\nRegistering ${specs.length} stages on ${CONTRACT} ...`);
   const txHash = await client.writeContract({
     address: CONTRACT as `0x${string}`,
@@ -119,12 +143,24 @@ async function main(): Promise<void> {
   });
 
   console.log(`  tx ${txHash}`);
-  await client.waitForTransactionReceipt({
+  const receipt = await client.waitForTransactionReceipt({
     hash: txHash,
     status: TransactionStatus.FINALIZED,
     interval: 3000,
     retries: 40,
   });
+
+  // Finalized only means the network agreed on an outcome — that outcome can
+  // still be a revert. Without this check a reverted registration printed
+  // "Done. Registered stages: []" and exited 0, which reads as success.
+  if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
+    console.error(
+      `\nRegistration reverted on-chain. Contract returned:\n  ${JSON.stringify(
+        receipt.txExecutionResultName,
+      )}\n\nExplorer: https://explorer-studio.genlayer.com/tx/${txHash}`,
+    );
+    process.exit(1);
+  }
 
   const registered = await client.readContract({
     address: CONTRACT as `0x${string}`,
@@ -132,7 +168,17 @@ async function main(): Promise<void> {
     args: [],
   });
 
-  console.log(`\nDone. Registered stages: ${String(registered)}`);
+  const registeredText = String(registered);
+  if (registeredText === "[]" || registeredText === "") {
+    console.error(
+      `\nThe transaction finalized but the contract still reports no registered\n` +
+        `stages. Nothing was written — do not run warm-stages yet.\n\n` +
+        `Explorer: https://explorer-studio.genlayer.com/tx/${txHash}`,
+    );
+    process.exit(1);
+  }
+
+  console.log(`\nDone. Registered stages: ${registeredText}`);
   console.log(
     `Explorer: https://explorer-studio.genlayer.com/address/${CONTRACT}`,
   );
