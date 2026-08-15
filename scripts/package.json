@@ -9,6 +9,7 @@
     "warm-stages": "tsx ./src/warm-stages.ts",
     "diagnose": "tsx ./src/diagnose.ts",
     "inspect-round": "tsx ./src/inspect-round.ts",
+    "deploy-contract": "tsx ./src/deploy-contract.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
