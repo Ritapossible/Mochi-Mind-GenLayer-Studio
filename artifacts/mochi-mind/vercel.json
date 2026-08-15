@@ -3,6 +3,11 @@
   "buildCommand": "if [ -f pnpm-workspace.yaml ]; then pnpm --filter @workspace/mochi-mind run build; else cd ../.. && pnpm --filter @workspace/mochi-mind run build; fi",
   "outputDirectory": "dist/public",
   "framework": null,
+  "functions": {
+    "api/**/*.ts": {
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],

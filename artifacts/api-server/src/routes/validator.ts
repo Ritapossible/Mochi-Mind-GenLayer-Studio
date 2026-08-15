@@ -51,7 +51,13 @@ router.get("/validator/status", (_req, res) => {
   });
 });
 
-/** Cached read — deterministic storage, no consensus round. */
+/**
+ * Cached read — deterministic storage, no consensus round.
+ *
+ * Mirrors the { ready, result } envelope of the Vercel function at
+ * artifacts/mochi-mind/api/validator/stage/[id].ts so the browser can poll
+ * either backend with the same code.
+ */
 router.get("/validator/stage/:id", async (req, res) => {
   const stageId = parseStageId(req.params.id);
   if (stageId === null) {
@@ -65,7 +71,13 @@ router.get("/validator/stage/:id", async (req, res) => {
 
   try {
     const verdict = await readStageVerdict(stageId);
-    res.json({ stageId, verdict, cached: verdict !== null });
+    res.json({
+      stageId,
+      ready: verdict !== null,
+      result: verdict
+        ? toResponse(stageId, { verdict, cached: true, elapsedMs: 0 })
+        : null,
+    });
   } catch (err) {
     logger.warn({ stageId, err: shortError(err) }, "verdict read failed");
     res.status(502).json({ error: shortError(err) });
@@ -104,7 +116,9 @@ router.post("/validator/submit", async (req, res) => {
     }
 
     const outcome = await pending;
-    res.json(toResponse(stageId, outcome));
+    // This server is long-running, so unlike the serverless path it can wait
+    // out a full consensus round and always answers ready:true.
+    res.json({ ready: true, result: toResponse(stageId, outcome) });
   } catch (err) {
     logger.warn({ stageId, err: shortError(err) }, "submit_pick failed");
     res.status(502).json({ error: shortError(err) });
@@ -125,7 +139,7 @@ router.post("/validator/analyze", async (req, res) => {
 
   try {
     const outcome = await analyzeStage(stageId);
-    res.json(toResponse(stageId, outcome));
+    res.json({ ready: true, result: toResponse(stageId, outcome) });
   } catch (err) {
     logger.warn({ stageId, err: shortError(err) }, "analyze_stage failed");
     res.status(502).json({ error: shortError(err) });

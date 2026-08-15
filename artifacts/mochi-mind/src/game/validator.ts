@@ -4,20 +4,32 @@
 // signing key. It posts the player's two picks to our API server, which owns
 // the key and drives the Intelligent Contract:
 //
-//   browser ──POST /api/validator/submit──> api-server ──> GenLayer Studio
+//   browser ──POST /api/validator/submit──> serverless fn ──> GenLayer Studio
 //
 // The contract does the work that matters: it fetches the stage PNG over https,
 // shows it to a vision model, and has every validator independently re-fetch and
 // re-judge before the round settles. Nothing about the answer originates here.
 //
+// A cold consensus round takes 60–120 s, which is longer than a serverless
+// function may run. So the round is split in two: submit returns as soon as the
+// transaction is broadcast, and we poll a cheap storage read for the verdict.
+// Stages pre-warmed by `pnpm --filter @workspace/scripts warm-stages` answer on
+// the first call and never reach the polling loop.
+//
 // Contract: contracts/MochiMindValidator.py
 
 import type { Stage } from "./stages";
 
+// Empty by default: the API is served from this same Vercel deployment under
+// /api, so no cross-origin base URL is needed. Set VITE_API_BASE_URL only when
+// pointing the game at an api-server hosted somewhere else.
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 
 /** A consensus round is 60–120 s on Studio. Give it room, then fall back. */
-const REQUEST_TIMEOUT_MS = 180_000;
+const ROUND_DEADLINE_MS = 180_000;
+/** Each individual HTTP call is fast now; only the round as a whole is slow. */
+const REQUEST_TIMEOUT_MS = 30_000;
+const POLL_INTERVAL_MS = 3_000;
 
 export type ValidatorPick = {
   /** What the AI opponent played. */
@@ -34,7 +46,8 @@ export type ValidatorPick = {
   imageUrl?: string;
 };
 
-type SubmitResponse = {
+/** The shaped verdict both /submit and /stage/:id return once one exists. */
+type RoundResultPayload = {
   stageId: number;
   truth: string[];
   picks: string[];
@@ -44,7 +57,12 @@ type SubmitResponse = {
   imageUrl?: string;
   txHash?: string | null;
   cached?: boolean;
-  elapsedMs?: number;
+};
+
+type SubmitResponse = {
+  ready: boolean;
+  result?: RoundResultPayload | null;
+  txHash?: string | null;
 };
 
 function pair(colors: string[] | undefined, fallback: [string, string]): [string, string] {
@@ -81,42 +99,70 @@ export function validatorAnalyzeLocal(stage: Stage): ValidatorPick {
 
 // ─── On-chain path ────────────────────────────────────────────────────────────
 
-async function validatorAnalyzeOnChain(
-  stage: Stage,
-  playerPicks: string[],
-): Promise<ValidatorPick> {
+async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const res = await fetch(`${API_BASE}/api/validator/submit`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stageId: stage.id, picks: playerPicks }),
-      signal: controller.signal,
-    });
-
+    const res = await fetch(url, { ...init, signal: controller.signal });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
       throw new Error(`API ${res.status}: ${detail.slice(0, 200)}`);
     }
-
-    const data = (await res.json()) as SubmitResponse;
-    const truth = pair(data.truth, stage.correct);
-
-    return {
-      picks: pair(data.picks, truth),
-      truth,
-      source: "onchain",
-      reasoning: data.reasoning,
-      coverage: data.coverage,
-      confidence: data.confidence,
-      txHash: data.txHash ?? undefined,
-      imageUrl: data.imageUrl,
-    };
+    return (await res.json()) as T;
   } finally {
     window.clearTimeout(timer);
   }
+}
+
+function toPick(data: RoundResultPayload, stage: Stage, txHash?: string | null): ValidatorPick {
+  const truth = pair(data.truth, stage.correct);
+  return {
+    picks: pair(data.picks, truth),
+    truth,
+    source: "onchain",
+    reasoning: data.reasoning,
+    coverage: data.coverage,
+    confidence: data.confidence,
+    txHash: data.txHash ?? txHash ?? undefined,
+    imageUrl: data.imageUrl,
+  };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+async function validatorAnalyzeOnChain(
+  stage: Stage,
+  playerPicks: string[],
+): Promise<ValidatorPick> {
+  const deadline = Date.now() + ROUND_DEADLINE_MS;
+
+  const submitted = await requestJson<SubmitResponse>(`${API_BASE}/api/validator/submit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ stageId: stage.id, picks: playerPicks }),
+  });
+
+  // Warm stage: the verdict was already on-chain, so it came back immediately.
+  if (submitted.ready && submitted.result) {
+    return toPick(submitted.result, stage, submitted.txHash);
+  }
+
+  // Cold stage: validators are still reaching consensus over the image. Poll
+  // the deterministic storage read until the verdict is written.
+  while (Date.now() < deadline) {
+    await sleep(POLL_INTERVAL_MS);
+
+    const polled = await requestJson<{ ready: boolean; result?: RoundResultPayload | null }>(
+      `${API_BASE}/api/validator/stage/${stage.id}`,
+    ).catch(() => null);
+
+    if (polled?.ready && polled.result) {
+      return toPick(polled.result, stage, submitted.txHash);
+    }
+  }
+
+  throw new Error(`consensus round did not settle within ${ROUND_DEADLINE_MS / 1000}s`);
 }
 
 function shortError(err: unknown): string {

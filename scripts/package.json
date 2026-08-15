@@ -6,6 +6,7 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "register-stages": "tsx ./src/register-stages.ts",
+    "warm-stages": "tsx ./src/warm-stages.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

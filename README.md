@@ -228,15 +228,23 @@ prefixed `VITE_` is inlined into the browser bundle and is public:
 GENLAYER_CONTRACT_ADDRESS=0x...
 GENLAYER_PRIVATE_KEY=0x...     # must be the contract owner — analyze_stage is owner-only
 GENLAYER_RPC_URL=              # optional, defaults to studionet
+DATABASE_URL=postgres://...    # Neon connection string, for the leaderboard
 ```
+
+`GENLAYER_PRIVATE_KEY` is also the spender wallet: it pays the gas for every player's
+round, so nobody needs a wallet to play. Use a throwaway account funded only for gas.
+A contract has no key of its own — this is the key of the account that *deployed* it,
+which is what makes it the owner.
 
 Browser-side (public by design):
 
 ```env
-VITE_API_BASE_URL=https://your-api-server-host
+VITE_API_BASE_URL=              # leave unset on Vercel — the API is same-origin
 ```
 
-Use a throwaway account funded only for gas.
+On Vercel the API ships as serverless functions in the same project under `/api`, so
+the browser calls its own origin and no base URL is needed. Set this only when
+pointing the game at an api-server hosted somewhere else.
 
 ---
 
@@ -263,16 +271,42 @@ the frontend must exist before the stages can be registered.
    ```
    The script fetches every image first and refuses to register anything if one is
    unreachable or returns HTML instead of a PNG.
-4. **Deploy the api-server**, set `GENLAYER_CONTRACT_ADDRESS` and
-   `GENLAYER_PRIVATE_KEY` on it, then rebuild the frontend with `VITE_API_BASE_URL`
-   pointed at it.
-5. **Verify end to end:**
+4. **Set the server-side variables in Vercel** (Settings → Environment Variables):
+   `GENLAYER_CONTRACT_ADDRESS`, `GENLAYER_PRIVATE_KEY`, and `DATABASE_URL`. Leave
+   `VITE_API_BASE_URL` unset. Redeploy so the functions pick them up.
+5. **Create the leaderboard table:**
    ```bash
-   curl https://your-api-server-host/api/validator/status
-   curl -X POST https://your-api-server-host/api/validator/analyze \
-     -H 'Content-Type: application/json' -d '{"stageId":1}'
+   DATABASE_URL=postgres://... pnpm --filter @workspace/db push
    ```
-   The second call runs a real consensus round and takes 60–120 s.
+6. **Warm every stage** so players never wait on a cold consensus round:
+   ```bash
+   GENLAYER_CONTRACT_ADDRESS=0x... \
+   GENLAYER_PRIVATE_KEY=0x... \
+   pnpm --filter @workspace/scripts warm-stages
+   ```
+   This takes 60–120 s per unjudged stage and runs on your machine, where nothing
+   can time it out. Skip it and the first player to reach each stage waits through
+   the round in-browser instead.
+7. **Verify end to end:**
+   ```bash
+   curl https://your-app.vercel.app/api/validator/status
+   curl https://your-app.vercel.app/api/validator/stage/1
+   ```
+   The second call should return `"ready": true` once the stage is warm.
+
+### Why the API is split into submit + poll
+
+A cold consensus round takes 60–120 s. A Vercel function may run for at most 60 s
+(and only 10 s by default on Hobby), so a request that waits for the round to settle
+cannot work there. Instead:
+
+- `POST /api/validator/submit` broadcasts the transaction and returns immediately —
+  `{ ready: true, result }` if the stage was already judged, otherwise `{ ready: false }`
+- `GET /api/validator/stage/:id` is a deterministic storage read that returns in
+  milliseconds; the browser polls it until the verdict appears
+
+Warm stages never reach the polling loop. The long-running `artifacts/api-server` is
+still there for local dev and returns the same `{ ready, result }` envelope.
 
 ---
 

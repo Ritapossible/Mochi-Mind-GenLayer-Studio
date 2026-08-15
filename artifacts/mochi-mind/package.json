@@ -75,5 +75,8 @@
     "wouter": "^3.3.5",
     "zod": "catalog:"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "genlayer-js": "1.1.8"
+  }
 }
