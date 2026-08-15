@@ -33,6 +33,9 @@ externalPort = 80
 
 [userenv]
 
+# Anything prefixed VITE_ is inlined into the browser bundle and is public.
+# The GenLayer signing key and contract address are server-side only and live on
+# the api-server deployment as GENLAYER_PRIVATE_KEY / GENLAYER_CONTRACT_ADDRESS.
+# The only VITE_ variable this project needs is the public API origin:
 [userenv.shared]
-VITE_SPENDER_PRIVATE_KEY = ""
-VITE_STUDIO_CONTRACT = "0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee"
+VITE_API_BASE_URL = ""

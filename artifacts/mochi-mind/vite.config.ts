@@ -44,10 +44,7 @@ export default defineConfig({
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
     },
-    dedupe: ["react", "react-dom", "viem"],
-  },
-  optimizeDeps: {
-    exclude: ["genlayer-js"],
+    dedupe: ["react", "react-dom"],
   },
   root: path.resolve(import.meta.dirname),
   build: {

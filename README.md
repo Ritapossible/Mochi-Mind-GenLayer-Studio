@@ -1,19 +1,295 @@
 # MochiMind
 
-> “See what AI sees… or better.”
+> "See what AI sees… or better."
 
-MochiMind is a GenLayer-powered multiplayer visual reasoning mini-game where players compete against Validator AI to identify Mochi’s dominant colors across evolving stages.
+MochiMind is a GenLayer-powered perception game. A player looks at a blurred image
+of a character called Mochi and picks the two colors that dominate it. A GenLayer
+Intelligent Contract looks at **the same image** and decides, by validator
+consensus, which two colors actually dominate.
 
-Built with GenLayer Intelligent Contracts, MochiMind combines:
-- AI validator reasoning
-- subjective consensus
-- visual intuition
-- on-chain intelligent execution
-- replayable multiplayer gameplay
+Human intuition against on-chain AI consensus, over 20 evolving stages.
 
 ---
 
-# Live Concept
+## The Intelligent Contract
+
+**Source: [`contracts/MochiMindValidator.py`](./contracts/MochiMindValidator.py)** — in this
+repository, in full. See [`contracts/README.md`](./contracts/README.md) for the design notes,
+the equivalence principle, and deployment steps.
+
+```text
+Contract address:  <pending redeploy — will be added here>
+Explorer:          https://explorer-studio.genlayer.com/address/<address>
+Network:           GenLayer Studio (studionet)
+```
+
+> Studio validators must be configured with a **vision-capable model** (GPT-5,
+> Claude Sonnet). A text-only validator cannot see the image and every round will fail.
+
+### What the contract actually decides
+
+"Which two colors dominate this image?" is a subjective visual judgment. There is no
+deterministic API that answers it, and no single party who should be trusted to answer
+it. That is the shape of problem GenLayer's Optimistic Democracy exists for.
+
+The caller supplies **only** the stage number and the player's two picks:
+
+```python
+submit_pick(stage_id, player_picks)
+```
+
+That is the entire payload. The image URL and the candidate colors are registered
+on-chain by the contract owner. Dominance is measured by a vision model looking at
+the actual PNG bytes. The player cannot supply the image, the candidates, the
+weights, or the answer.
+
+### Trust boundary
+
+| Owner | Responsibility |
+|---|---|
+| Frontend / backend | UI, blur animation, score display, leaderboard, and *submitting* the player's two picks |
+| **This contract** | The stage registry (image URL + candidate colors), the vision judgment over the real image, the validator comparison rule, and the stored verdict |
+| External source | The raw PNG bytes, which every validator re-fetches and re-examines independently |
+
+---
+
+## How a round works
+
+```text
+submit_pick(stage_id, player_picks)
+        │
+        ├─ look up the stage on-chain → image_url, candidate colors
+        │
+        ├─ LEADER      gl.nondet.web.get(image_url)      → raw PNG bytes
+        │              verify PNG/JPEG magic bytes       → reject HTML error pages
+        │              gl.nondet.exec_prompt(..., images=[png])
+        │              normalize → coverage % per candidate, ranked
+        │
+        ├─ VALIDATORS  re-fetch the same image, re-run the same judgment,
+        │              then compare decisions (not formatting)
+        │
+        ├─ consensus → final_colors  (ground truth for the round)
+        ├─ derive    → ai_colors     (the opponent's move)
+        └─ store     → verdict + append the round to the on-chain audit log
+```
+
+### The equivalence principle used
+
+`gl.vm.run_nondet_unsafe` with a custom validator function.
+
+Not `strict_eq` — two vision models will never agree on exact percentages. Not a
+schema check either: a validator that only confirms the leader returned well-formed
+JSON is not consensus, it is trust.
+
+Each validator independently fetches the image and forms its own opinion, then:
+
+- Same two colors → **agree**
+- No colors in common → **disagree**, rotate the leader
+- One color in common → agree **only if** the disputed colors' coverage estimates are
+  within `COVERAGE_TOLERANCE` (10 percentage points) — the explicit tolerance for
+  "these two were effectively tied", which genuinely happens on stages like Crystal
+  Mochi (White vs Silver)
+
+Failures are classified with `[EXPECTED]` / `[EXTERNAL]` / `[TRANSIENT]` /
+`[LLM_ERROR]` prefixes so validators compare error paths correctly rather than
+agreeing on broken state.
+
+---
+
+## Contract API
+
+| Method | Kind | Purpose |
+|---|---|---|
+| `register_stage(stage_id, image_url, options)` | write, owner | Pin one stage's image and candidate colors |
+| `register_stages(specs_json)` | write, owner | Same, in bulk — all 20 in one transaction |
+| `analyze_stage(stage_id)` | write, owner | Force a fresh consensus round over the image |
+| `submit_pick(stage_id, player_picks)` | write | Play a round; uses the cached verdict if one exists |
+| `transfer_ownership(new_owner)` | write, owner | Hand over admin |
+| `get_stage_result(stage_id)` | view | Cached verdict JSON for a stage |
+| `get_last_result()` | view | Most recent verdict JSON |
+| `get_stage(stage_id)` | view | Registered image URL + candidate colors |
+| `get_registered_stages()` | view | JSON array of registered stage ids |
+| `get_round_count()` / `get_round(i)` | view | On-chain audit log of played rounds |
+| `get_owner()` | view | Current owner address |
+
+Verdict shape:
+
+```json
+{
+  "stage_id": 20,
+  "final_colors": ["Purple", "White"],
+  "ai_colors": ["Purple", "Lavender"],
+  "coverage": { "Purple": 44.1, "White": 31.7, "Lavender": 15.2, "Blue": 9.0 },
+  "confidence": 16.5,
+  "consensus_reasoning": "Purple covers the body, white the face and belly.",
+  "image_url": "https://your-app.vercel.app/stages/stage-20.png",
+  "image_sha256": "…",
+  "image_bytes": 136107,
+  "source": "onchain-vision"
+}
+```
+
+---
+
+## Addressing the previous review
+
+This submission was previously rejected on two counts. Both are fixed, and both are
+verifiable from the repository.
+
+**1. "The submitted repository does not include the Intelligent Contract source
+described in the README."**
+
+The contract is now committed at [`contracts/MochiMindValidator.py`](./contracts/MochiMindValidator.py).
+It is the file this README describes — not a summary of one.
+
+**2. "Have it evaluate meaningful image evidence rather than client-provided weights
+that already encode the answer."**
+
+This was the real problem, and it was correct. The old client called:
+
+```ts
+submit_pick(stage_id, candidate_colors, dominance_scores, zone_weights)
+```
+
+where `dominance_scores` came from a `weights` table in `stages.ts`:
+
+```ts
+const wA  = 44 - trickiness * 6;   // ← always highest, always a correct color
+const wB  = 36 - trickiness * 4;   // ← always second, always the other correct color
+const wD1 = 18 + trickiness * 22;  // ← decoy
+const wD2 = 14 + trickiness * 18;  // ← decoy
+```
+
+The two correct colors always carried the two largest weights. Any contract receiving
+that payload could return the right answer by sorting four numbers. The LLM call was
+decoration, and consensus had nothing to disagree about, because every validator was
+reading the same client-supplied answer key.
+
+**Now** the contract fetches the actual PNG over https and a vision model measures
+per-color surface coverage from the pixels. Every validator re-fetches the same image
+and re-judges it independently before the round settles. The weights table has been
+deleted — there is no `weights` anywhere in the repository, and the only thing the
+client sends is `(stage_id, player_picks)`.
+
+The evidence the validators evaluate is the image itself.
+
+---
+
+## Project structure
+
+```text
+Mochi-Mind-GenLayer-Studio/
+│
+├── contracts/
+│   ├── MochiMindValidator.py     # the Intelligent Contract
+│   └── README.md                 # design notes + deployment guide
+│
+├── artifacts/
+│   ├── mochi-mind/               # React frontend (Vite, TanStack Router)
+│   │   ├── public/stages/        # the 20 stage PNGs the validators fetch
+│   │   └── src/game/             # stages, validator client, sounds
+│   └── api-server/               # Express API — holds the GenLayer signing key
+│       └── src/routes/           # validator, leaderboard, health
+│
+├── scripts/
+│   └── src/register-stages.ts    # registers all 20 stages on-chain
+│
+├── lib/                          # shared workspace packages
+└── screenshots/
+```
+
+---
+
+## Running locally
+
+```bash
+pnpm install
+pnpm run typecheck
+pnpm --filter @workspace/mochi-mind dev
+```
+
+The api-server runs separately:
+
+```bash
+PORT=8080 pnpm --filter @workspace/api-server dev
+```
+
+Without an api-server the game still runs, but rounds fall back to an offline path
+that is **not** consensus. The UI labels those rounds "Offline · Not judged on-chain".
+
+---
+
+## Environment variables
+
+Server-side only — these must **never** be given a `VITE_` prefix, because anything
+prefixed `VITE_` is inlined into the browser bundle and is public:
+
+```env
+GENLAYER_CONTRACT_ADDRESS=0x...
+GENLAYER_PRIVATE_KEY=0x...     # must be the contract owner — analyze_stage is owner-only
+GENLAYER_RPC_URL=              # optional, defaults to studionet
+```
+
+Browser-side (public by design):
+
+```env
+VITE_API_BASE_URL=https://your-api-server-host
+```
+
+Use a throwaway account funded only for gas.
+
+---
+
+## Deploying
+
+Order matters — the contract fetches stage images from the frontend's own domain, so
+the frontend must exist before the stages can be registered.
+
+1. **Deploy the frontend** (Vercel, root directory `artifacts/mochi-mind`). This is
+   what publishes `/stages/stage-NN.png`. Confirm they are public and unauthenticated:
+   `curl -I https://your-app.vercel.app/stages/stage-01.png`
+2. **Lint and deploy the contract:**
+   ```bash
+   genvm-lint check contracts/MochiMindValidator.py
+   genlayer deploy --contract contracts/MochiMindValidator.py
+   ```
+   The deploying account becomes the owner and is the only one that can register stages.
+3. **Register the stages:**
+   ```bash
+   GENLAYER_CONTRACT_ADDRESS=0x... \
+   GENLAYER_PRIVATE_KEY=0x... \
+   MOCHI_IMAGE_BASE_URL=https://your-app.vercel.app \
+   pnpm --filter @workspace/scripts register-stages
+   ```
+   The script fetches every image first and refuses to register anything if one is
+   unreachable or returns HTML instead of a PNG.
+4. **Deploy the api-server**, set `GENLAYER_CONTRACT_ADDRESS` and
+   `GENLAYER_PRIVATE_KEY` on it, then rebuild the frontend with `VITE_API_BASE_URL`
+   pointed at it.
+5. **Verify end to end:**
+   ```bash
+   curl https://your-api-server-host/api/validator/status
+   curl -X POST https://your-api-server-host/api/validator/analyze \
+     -H 'Content-Type: application/json' -d '{"stageId":1}'
+   ```
+   The second call runs a real consensus round and takes 60–120 s.
+
+---
+
+## Caching
+
+A verdict is computed once per stage and reused. A consensus round costs 60–120 s on
+Studio; making every player wait through one for an image that has already been judged
+would be unplayable.
+
+- `submit_pick` uses the cached verdict when there is one, and still records the round
+  in the on-chain log
+- `analyze_stage` always runs a fresh round — use it to demo consensus
+- `register_stage` clears the cached verdict, because the evidence changed
+
+---
+
+## Gameplay
 
 Each round:
 
@@ -21,403 +297,90 @@ Each round:
 Blur → Predict → Validator AI Analyzes → Reveal → Score
 ```
 
-Players are shown a blurred Mochi character and must choose the **2 dominant colors** from 3 available options.
+Players see a blurred Mochi and choose the 2 dominant colors from 4 candidates. The
+contract judges the same image on-chain. The reveal shows the consensus truth, the
+player's result, and the AI opponent's result.
 
-At the same time, Validator AI performs its own reasoning on-chain using GenLayer Intelligent Contracts.
+After 20 stages, players discover Mochi's true original identity:
 
-The game then reveals:
-- the real dominant colors
-- the player’s result
-- the Validator AI result
-- final scores
-
-After 20 stages, players discover Mochi’s true original identity.
-
-Final Truth:
 ```text
 Purple + White
 ```
 
----
+### The AI opponent
 
-# Why MochiMind Exists
+Consensus decides the truth. If the AI opponent simply reused it, the AI would score
+20/20 every game and "Human vs Validator AI" would be meaningless.
 
-MochiMind was designed specifically for the GenLayer mini-game ecosystem to demonstrate:
+So `_derive_opponent` handicaps it in the one place a handicap is honest: when the
+vision model itself measured the 2nd and 3rd colors as nearly tied (`AMBIGUITY_GAP`,
+6 points), the opponent has to commit and can commit wrongly. The choice derives from
+the image digest, not randomness, so every validator computes the same opponent move
+and the round stays deterministic once the nondeterministic block closes.
 
-- Intelligent Contracts
-- subjective AI reasoning
-- Optimistic Democracy consensus
-- multiplayer replayability
-- AI vs human intuition
+The AI is reliably right on obvious stages and beatable on ambiguous ones — which is
+the game.
 
-Instead of traditional deterministic gameplay, MochiMind turns **perception itself** into the game mechanic.
+### 20 evolution stages
 
----
-
-# Core Features
-
-## Human vs Validator AI
-
-Players compete directly against Validator AI reasoning.
-
-The AI validator analyzes:
-- visual dominance
-- color weighting
-- identity significance
-- surface distribution
-- perception cues
+Sunrise, Forest, Ocean, Candy, Ember, Royal, Storm, Toxic, Sakura, Arctic, Shadow,
+Cosmic, Glitch, Desert, Crystal, Voltage, Eclipse, Genesis, Proto, and True Mochi.
+Each changes dominant colors, surface balance, and visual structure.
 
 ---
 
-## GenLayer Intelligent Contract Integration
+## Tech stack
 
-MochiMind uses a real deployed GenLayer Intelligent Contract with:
+**Frontend** — React, TypeScript, Vite, TanStack Router, TailwindCSS, Framer Motion,
+responsive mobile-first
 
-- `gl.nondet.exec_prompt()`
-- AI-powered subjective reasoning
-- on-chain consensus execution
-- validator agreement flow
-- GenVM execution
+**Backend** — Node.js, Express, `genlayer-js`
 
----
-
-## 20 Evolution Stages
-
-Each Mochi evolution changes:
-- dominant colors
-- surface balance
-- visual structure
-- emotional appearance
-
-Stages include:
-- Sunrise Mochi
-- Toxic Mochi
-- Cosmic Mochi
-- Forest Mochi
-- Shadow Mochi
-- Neon Mochi
-- Ember Mochi
-- Frost Mochi
-- and more
+**Blockchain / AI layer** — GenLayer Intelligent Contracts, GenVM, Optimistic
+Democracy consensus, `gl.nondet.web.get()`, `gl.nondet.exec_prompt()` with vision,
+`gl.vm.run_nondet_unsafe()`
 
 ---
 
-## Replayable Gameplay
+## GenLayer concepts demonstrated
 
-The game is designed to:
-- feel fast
-- remain replayable
-- encourage memory strategy
-- reward visual intuition
-
----
-
-# Tech Stack
-
-## Frontend
-- React
-- TypeScript
-- TailwindCSS
-- Framer Motion
-- Glassmorphism UI
-- Responsive mobile-first design
-
----
-
-## Backend
-- Node.js
-- Express
-- GenLayer SDK integration
-
----
-
-## Blockchain / AI Layer
-- GenLayer Intelligent Contracts
-- GenVM
-- Optimistic Democracy Consensus
-- AI Validator Reasoning
-- `gl.nondet.exec_prompt()`
-
----
-
-# Intelligent Contract
-
-## Contract Address
-
-```text
-0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee
-```
-
-## Explorer
-
-[GenLayer Studio Explorer Contract](https://explorer-studio.genlayer.com/address/0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee)
-
----
-
-# How The Validator AI Works
-
-The Validator AI receives:
-- candidate colors
-- dominance scores
-- zone weights
-
-The GenLayer Intelligent Contract then:
-1. Executes AI reasoning using `gl.nondet.exec_prompt()`
-2. Determines dominant colors
-3. Stores consensus result on-chain
-4. Returns validator reasoning
-
-Example response:
-
-```json
-{
-  "final_colors": ["Purple", "White"],
-  "consensus_reasoning": "Purple and White dominate the visual mass."
-}
-```
-
----
-
-# GenLayer Integration
-
-MochiMind uses real GenLayer intelligent execution.
-
-The project demonstrates:
-- subjective AI consensus
-- non-deterministic execution
-- validator agreement
-- intelligent contract storage
-- AI-native blockchain gameplay
-
-Built using:
-- GenLayer Studio
-- GenVM
-- Intelligent Contracts SDK
-
-Learn more about GenLayer:
-
-- [GenLayer Official Website](https://www.genlayer.com/)
-- [GenLayer Studio Docs](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio)
-
----
-
-# Project Structure
-
-```bash
-MochiMind/
-│
-├── client/
-│   ├── components/
-│   ├── pages/
-│   ├── assets/
-│   └── game/
-│
-├── server/
-│   ├── routes/
-│   ├── validator/
-│   └── api/
-│
-├── contracts/
-│   └── MochiMindValidator.py
-│
-├── public/
-│
-└── README.md
-```
-
----
-
-# Smart Contract Flow
-
-## Deploy Contract
-
-Deploy through:
-- GenLayer Studio
-
-Reference:
-- [Deploying Contracts in GenLayer Studio](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio/loading-contract)
-
----
-
-## Execute AI Validation
-
-Frontend calls:
-
-```python
-submit_pick()
-```
-
-The Intelligent Contract:
-- performs AI reasoning
-- reaches validator consensus
-- stores result
-
-Then:
-
-```python
-get_last_result()
-```
-
-returns the final validator decision.
-
----
-
-# Installation
-
-## Clone Repository
-
-```bash
-git clone https://github.com/Ritapossible/Mochi-Mind-GenLayer-Studio.git
-```
-
----
-
-## Install Dependencies
-
-```bash
-npm install
-```
-
----
-
-## Run Development Server
-
-```bash
-npm run dev
-```
-
----
-
-# Environment Variables
-
-```env
-GENLAYER_RPC_URL=
-GENLAYER_PRIVATE_KEY=
-GENLAYER_CONTRACT_ADDRESS=
-```
-
----
-
-# Example Gameplay Flow
-
-```text
-Stage Starts
-      ↓
-Blurred Mochi Appears
-      ↓
-Player Picks 2 Colors
-      ↓
-Validator AI Executes On-chain
-      ↓
-Consensus Result Returns
-      ↓
-Blur Fades
-      ↓
-Winner Decided
-      ↓
-Next Stage Unlocks
-```
-
----
-
-# Design Philosophy
-
-MochiMind was designed around one core question:
-
-> “Can humans still outperform AI in visual intuition?”
-
-The game transforms:
-- perception
-- memory
-- intuition
-- identity recognition
-
-into an on-chain competitive experience.
-
----
-
-# GenLayer Concepts Demonstrated
-
-MochiMind demonstrates several major GenLayer concepts:
-
-| Feature | Usage |
+| Concept | Where |
 |---|---|
-| Intelligent Contracts | AI reasoning inside contracts |
-| Non-deterministic execution | `gl.nondet.exec_prompt()` |
-| Optimistic Democracy | validator agreement |
-| Subjective consensus | color perception |
-| AI-native blockchain logic | gameplay execution |
+| Intelligent Contracts | `contracts/MochiMindValidator.py` |
+| Non-deterministic execution | `gl.nondet.exec_prompt()` over real image bytes |
+| Web access from a contract | `gl.nondet.web.get()` fetching the stage PNG |
+| Optimistic Democracy | `gl.vm.run_nondet_unsafe()` with a custom validator function |
+| Subjective consensus | Color dominance measured from pixels, compared with tolerance |
+| Error classification | `[EXPECTED]` / `[EXTERNAL]` / `[TRANSIENT]` / `[LLM_ERROR]` |
+| On-chain state | Stage registry, verdict cache, append-only round log |
 
 ---
 
-# Performance
-
-Typical validator execution time:
-
-```text
-~30–40 seconds
-```
-
-This includes:
-- AI prompt execution
-- validator consensus
-- on-chain agreement
-- GenVM processing
-
----
-
-# Future Improvements
-
-- Multiplayer live rooms
-- XP leaderboard system
-- Weekly tournaments
-- NFT Mochi skins
-- Wallet progression
-- Ranked AI difficulty
-- Spectator mode
-- Daily challenge mode
-
----
-
-# Screenshots
+## Screenshots
 
 ![Landing Page](./screenshots/landingpage.png)
 
 ![Gameplay](./screenshots/gameplay.png)
 
 ![Validator AI](./screenshots/validator.png)
----
-
-# Inspiration
-
-MochiMind is inspired by GenLayer’s vision for:
-- subjective consensus
-- AI-native contracts
-- programmable reasoning
-- intelligent multiplayer systems
 
 ---
 
-# Acknowledgements
+## Learn more
+
+- [GenLayer](https://www.genlayer.com/)
+- [GenLayer Documentation](https://docs.genlayer.com)
+- [GenLayer Studio](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio)
+- [GenLayer Skills](https://skills.genlayer.com)
+
+---
+
+## License
+
+MIT
+
+## Author
+
+RitaCryptoTips — [@RitaCryptoTips](https://x.com/RitaCryptoTips)
 
 Built for the GenLayer Mini-Games ecosystem.
-
-Powered by:
-- [GenLayer](https://www.genlayer.com/)
-- [GenLayer Studio](https://docs.genlayer.com/developers/intelligent-contracts/tools/genlayer-studio)
-
----
-
-# License
-
-MIT License
-
----
-
-# Author
-
-RitaCryptoTips
-
-X:
-[@RitaCryptoTips](https://x.com/RitaCryptoTips)
-````7

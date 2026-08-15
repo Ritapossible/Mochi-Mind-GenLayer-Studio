@@ -56,6 +56,9 @@ function PlayPage() {
   const [validatorFetchMs, setValidatorFetchMs] = useState<number | null>(null);
   const [validatorSource, setValidatorSource] = useState<"onchain" | "local-consensus" | null>(null);
   const [validatorTxHash, setValidatorTxHash] = useState<string | null>(null);
+  // Ground truth for the round, as returned by the Intelligent Contract. Null
+  // until the reveal lands; `stage.correct` is only the offline fallback.
+  const [truthColors, setTruthColors] = useState<[string, string] | null>(null);
   const [playerScore, setPlayerScore] = useState(0);
   const [validatorScore, setValidatorScore] = useState(0);
   const [roundResult, setRoundResult] = useState<RoundResult | null>(null);
@@ -63,19 +66,29 @@ function PlayPage() {
   const [consensusElapsed, setConsensusElapsed] = useState(0);
   const tickRef = useRef<number | null>(null);
   const consensusTickRef = useRef<number | null>(null);
+  // Guards handleLock against a second entry. A ref, not state: the countdown
+  // effect closes over `locked` from the render that created it, so the stale
+  // value would let a click and the timeout both through — and each one submits
+  // a real on-chain transaction.
+  const lockedRef = useRef(false);
 
   const stage = STAGES[stageIdx];
   const total = STAGES.length;
+  // Before the reveal there is no on-chain verdict yet, so the local answer
+  // stands in. After it lands, the contract's verdict is what counts.
+  const truth = truthColors ?? stage.correct;
 
   function resetStage() {
     setPhase("playing");
     setSecondsLeft(TURN_SECONDS);
     setPlayerPicks([]);
+    lockedRef.current = false;
     setLocked(false);
     setValidatorPicks(null);
     setValidatorFetchMs(null);
     setValidatorSource(null);
     setValidatorTxHash(null);
+    setTruthColors(null);
     setRoundResult(null);
     setRevealFlash(false);
     setConsensusElapsed(0);
@@ -100,21 +113,24 @@ function PlayPage() {
     };
   }, [phase, validatorPicks]);
 
+  // The updater only decrements. React may invoke an updater more than once, so
+  // it has to stay pure — reaching zero is acted on by the effect below rather
+  // than from inside setState.
   useEffect(() => {
     if (phase !== "playing") return;
     tickRef.current = window.setInterval(() => {
-      setSecondsLeft((s) => {
-        if (s <= 1) {
-          window.clearInterval(tickRef.current!);
-          handleLock(true);
-          return 0;
-        }
-        return s - 1;
-      });
+      setSecondsLeft((s) => (s <= 0 ? 0 : s - 1));
     }, 1000);
     return () => { if (tickRef.current) window.clearInterval(tickRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, stageIdx]);
+
+  // Time ran out — lock in with no picks.
+  useEffect(() => {
+    if (phase !== "playing" || secondsLeft > 0) return;
+    if (tickRef.current) window.clearInterval(tickRef.current);
+    void handleLock(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, secondsLeft]);
 
   useEffect(() => {
     if (phase !== "playing") return;
@@ -138,7 +154,8 @@ function PlayPage() {
   }
 
   async function handleLock(timedOut = false) {
-    if (locked) return;
+    if (lockedRef.current) return;
+    lockedRef.current = true;
     setLocked(true);
     playLockIn();
     if (tickRef.current) window.clearInterval(tickRef.current);
@@ -149,22 +166,23 @@ function PlayPage() {
     playRevealWhoosh();
 
     const t0 = performance.now();
-    const v = await validatorAnalyze(stage);
+    const v = await validatorAnalyze(stage, timedOut ? [] : playerPicks);
     const elapsed = Math.round(performance.now() - t0);
     setValidatorPicks(v.picks);
+    setTruthColors(v.truth);
     setValidatorFetchMs(elapsed);
     setValidatorSource(v.source);
     if (v.txHash) setValidatorTxHash(v.txHash);
 
     // Brief pause so the validator chips animate in before result cards flip
     window.setTimeout(() => {
-      const r = scoreRound(timedOut ? [] : playerPicks, v.picks, stage.correct);
+      const r = scoreRound(timedOut ? [] : playerPicks, v.picks, v.truth);
       setPlayerScore((s) => s + r.player);
       setValidatorScore((s) => s + r.validator);
       setRoundResult(r.result);
       setPhase("result");
       stage.options.forEach((_, i) => {
-        const isCorrect = stage.correct.includes(stage.options[i].name as never);
+        const isCorrect = v.truth.includes(stage.options[i].name);
         window.setTimeout(() => playCardChime(isCorrect, 0), i * 150 + 80);
       });
       window.setTimeout(() => playResultFanfare(r.result), stage.options.length * 150 + 480);
@@ -326,7 +344,7 @@ function PlayPage() {
                   className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3"
                 >
                   {stage.options.map((opt, i) => {
-                    const isCorrect = stage.correct.includes(opt.name as never);
+                    const isCorrect = truth.includes(opt.name);
                     const wasSelected = playerPicks.includes(opt.name);
                     return (
                       <motion.div
@@ -415,7 +433,7 @@ function PlayPage() {
           <ValidatorPanel
             phase={phase}
             picks={validatorPicks}
-            correct={stage.correct}
+            correct={truth}
             result={roundResult}
             playerPicks={playerPicks}
             fetchMs={validatorFetchMs}
@@ -528,7 +546,7 @@ function ValidatorFetchChip({
         ) : source === "local-consensus" ? (
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border-2 border-violet-400/60 bg-violet-50 text-[11px] font-extrabold text-violet-700 w-fit">
             <Brain className="size-3" />
-            3 AI Validators · Simulated
+            Offline · Not judged on-chain
             {fetchMs !== null && <span className="ml-1 opacity-70">{fetchMs}ms</span>}
           </div>
         ) : source === "onchain" ? (

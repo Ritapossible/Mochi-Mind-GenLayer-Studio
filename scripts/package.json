@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "register-stages": "tsx ./src/register-stages.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "genlayer-js": "1.1.8"
   },
   "devDependencies": {
     "@types/node": "catalog:",

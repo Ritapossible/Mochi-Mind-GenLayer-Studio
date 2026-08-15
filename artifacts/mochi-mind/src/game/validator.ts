@@ -1,238 +1,155 @@
-// MochiMind — Validator AI powered by GenLayer Studio on-chain AI.
+// MochiMind — Validator AI client.
 //
-// Contract: 0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee (GenLayer Studio)
+// The browser no longer talks to GenLayer directly and no longer holds a
+// signing key. It posts the player's two picks to our API server, which owns
+// the key and drives the Intelligent Contract:
 //
-// WHY writeContract, not readContract:
-//   select_dominant_colors() calls gl.nondet.exec_prompt() internally.
-//   Non-deterministic operations require the full GenLayer consensus round
-//   (multiple AI validators must agree). A plain gen_call / readContract
-//   cannot run the LLM validators — it fails with "execution failed".
-//   Solution:
-//     1. writeContract → submit_pick()  (triggers AI consensus)
-//     2. waitForTransactionReceipt     (wait for FINALIZED consensus)
-//     3. readContract → get_last_result() (deterministic storage read)
+//   browser ──POST /api/validator/submit──> api-server ──> GenLayer Studio
 //
-// Spender wallet covers gas so players never need a wallet.
-// Falls back to local 3-validator consensus ONLY if Studio is unreachable
-// or the transaction times out.
+// The contract does the work that matters: it fetches the stage PNG over https,
+// shows it to a vision model, and has every validator independently re-fetch and
+// re-judge before the round settles. Nothing about the answer originates here.
+//
+// Contract: contracts/MochiMindValidator.py
 
-import type { Address } from "viem";
 import type { Stage } from "./stages";
 
-export const VALIDATOR_CONTRACT_ADDRESS: Address =
-  (import.meta.env.VITE_STUDIO_CONTRACT as Address | undefined) ??
-  "0x2Ce9ec4668DA02893D6B6bB5128c77Ef3c40B7ee";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 
-const SPENDER_PK = import.meta.env.VITE_SPENDER_PRIVATE_KEY as
-  | `0x${string}`
-  | undefined;
+/** A consensus round is 60–120 s on Studio. Give it room, then fall back. */
+const REQUEST_TIMEOUT_MS = 180_000;
 
 export type ValidatorPick = {
+  /** What the AI opponent played. */
   picks: [string, string];
-  scores: Record<string, number>;
+  /** Ground truth for the round, as decided by validator consensus. */
+  truth: [string, string];
   source: "onchain" | "local-consensus";
   reasoning?: string;
-  validators?: Array<{ name: string; colors: string[]; confidence: number }>;
+  /** Per-color surface coverage the vision model measured, 0–100. */
+  coverage?: Record<string, number>;
+  /** How far the 2nd place color beat the 3rd. Low means a genuinely close call. */
+  confidence?: number;
   txHash?: string;
+  imageUrl?: string;
 };
 
-// ─── Local Consensus Fallback ─────────────────────────────────────────────────
+type SubmitResponse = {
+  stageId: number;
+  truth: string[];
+  picks: string[];
+  coverage?: Record<string, number>;
+  confidence?: number;
+  reasoning?: string;
+  imageUrl?: string;
+  txHash?: string | null;
+  cached?: boolean;
+  elapsedMs?: number;
+};
 
-function runSimulatedValidator(
-  name: string,
-  colors: string[],
-  baseScores: Record<string, number>,
-  strategy: "visual" | "perceived" | "identity",
-): { name: string; colors: string[]; confidence: number } {
-  const scored: Record<string, number> = {};
-  for (const c of colors) {
-    const base = baseScores[c] ?? 10;
-    let score = base;
-    if (strategy === "visual") {
-      score = base * 1.1 + (Math.random() - 0.5) * base * 0.18;
-    } else if (strategy === "perceived") {
-      score = Math.pow(base, 1.15) + (Math.random() - 0.5) * base * 0.22;
-    } else {
-      score = base + (Math.random() - 0.5) * base * 0.35;
-    }
-    scored[c] = Math.max(1, score);
-  }
-  const ranked = Object.entries(scored)
-    .sort(([, a], [, b]) => b - a)
-    .map(([c]) => c);
-  const vals = Object.values(scored).sort((a, b) => b - a);
-  const gap = vals.length >= 3 ? ((vals[1] - vals[2]) / vals[1]) * 100 : 75;
-  return { name, colors: ranked.slice(0, 2), confidence: Math.min(99, Math.max(40, Math.round(gap))) };
+function pair(colors: string[] | undefined, fallback: [string, string]): [string, string] {
+  if (!Array.isArray(colors) || colors.length < 2) return fallback;
+  return [colors[0], colors[1]];
 }
 
+// ─── Offline fallback ─────────────────────────────────────────────────────────
+
+/**
+ * Used only when the API server or Studio is unreachable, so the game stays
+ * playable in local dev. This path is labelled "offline" in the UI and is NOT
+ * consensus — it falls back to the stage's local answer and gives the opponent a
+ * difficulty-scaled chance of missing the second color.
+ */
 export function validatorAnalyzeLocal(stage: Stage): ValidatorPick {
-  const colors = stage.options.map((o) => o.name);
-  const baseScores: Record<string, number> = {};
-  for (const opt of stage.options) {
-    baseScores[opt.name] = Math.round(stage.weights[opt.name] ?? 10);
-  }
-  const vision = runSimulatedValidator("Vision Validator", colors, baseScores, "visual");
-  const perception = runSimulatedValidator("Perception Validator", colors, baseScores, "perceived");
-  const identity = runSimulatedValidator("Identity Validator", colors, baseScores, "identity");
-  const scoreMap: Record<string, number> = {};
-  for (const v of [vision, perception, identity]) {
-    for (const c of v.colors) scoreMap[c] = (scoreMap[c] ?? 0) + v.confidence;
-  }
-  const ranked = Object.entries(scoreMap).sort(([, a], [, b]) => b - a).map(([c]) => c);
+  const truth = stage.correct;
+  const decoys = stage.options.map((o) => o.name).filter((n) => !truth.includes(n));
+
+  // Harder stages trip the offline opponent more often.
+  const missChance = 0.1 + stage.difficulty * 0.08;
+  const missed = decoys.length > 0 && Math.random() < missChance;
+  const picks: [string, string] = missed
+    ? [truth[0], decoys[Math.floor(Math.random() * decoys.length)]]
+    : [truth[0], truth[1]];
+
   return {
-    picks: [ranked[0], ranked[1]],
-    scores: baseScores,
+    picks,
+    truth,
     source: "local-consensus",
-    reasoning: "Local AI consensus via 3 simulated validators (Vision, Perception, Identity).",
-    validators: [vision, perception, identity],
+    reasoning: "Offline fallback — GenLayer Studio was unreachable, so this round was not judged on-chain.",
   };
 }
 
-// ─── GenLayer Studio On-Chain Validation ─────────────────────────────────────
+// ─── On-chain path ────────────────────────────────────────────────────────────
 
-/**
- * Build a genlayer-js client using the spender account.
- * createAccount() from genlayer-js creates a viem-compatible local account.
- */
-async function buildClient() {
-  if (!SPENDER_PK) {
-    throw new Error(
-      "VITE_SPENDER_PRIVATE_KEY is not set. Cannot call on-chain contract.",
-    );
-  }
-  const [{ createClient, createAccount }, { studionet }] = await Promise.all([
-    import("genlayer-js"),
-    import("genlayer-js/chains"),
-  ]);
-  const account = createAccount(SPENDER_PK);
-  return createClient({ chain: studionet, account });
-}
+async function validatorAnalyzeOnChain(
+  stage: Stage,
+  playerPicks: string[],
+): Promise<ValidatorPick> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-/**
- * Parse whatever readContract returns for get_last_result:
- * Could be a string (JSON), a Map, or a plain object.
- */
-function parseLastResult(raw: unknown): { colors: string[]; reasoning?: string } {
-  let str: string;
+  try {
+    const res = await fetch(`${API_BASE}/api/validator/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stageId: stage.id, picks: playerPicks }),
+      signal: controller.signal,
+    });
 
-  if (typeof raw === "string") {
-    str = raw;
-  } else if (raw instanceof Map) {
-    str = (raw.get("last_result") as string | undefined) ?? JSON.stringify(Object.fromEntries(raw));
-  } else if (raw && typeof raw === "object") {
-    // Maybe already decoded as object
-    const r = raw as Record<string, unknown>;
-    if (r["final_colors"]) {
-      return {
-        colors: r["final_colors"] as string[],
-        reasoning: r["consensus_reasoning"] as string | undefined,
-      };
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`API ${res.status}: ${detail.slice(0, 200)}`);
     }
-    str = JSON.stringify(raw);
-  } else {
-    throw new Error(`Unexpected get_last_result type: ${typeof raw}`);
+
+    const data = (await res.json()) as SubmitResponse;
+    const truth = pair(data.truth, stage.correct);
+
+    return {
+      picks: pair(data.picks, truth),
+      truth,
+      source: "onchain",
+      reasoning: data.reasoning,
+      coverage: data.coverage,
+      confidence: data.confidence,
+      txHash: data.txHash ?? undefined,
+      imageUrl: data.imageUrl,
+    };
+  } finally {
+    window.clearTimeout(timer);
   }
-
-  // Parse JSON string
-  const parsed: Record<string, unknown> = JSON.parse(str);
-  const colors =
-    (parsed["final_colors"] as string[] | undefined) ??
-    (parsed["colors"] as string[] | undefined) ??
-    [];
-  const reasoning =
-    (parsed["consensus_reasoning"] as string | undefined) ??
-    (parsed["reasoning"] as string | undefined);
-  return { colors, reasoning };
-}
-
-async function validatorAnalyzeOnChain(stage: Stage): Promise<ValidatorPick> {
-  // Build argument arrays for submit_pick(stage_id, candidate_colors, dominance_scores, zone_weights)
-  const candidate_colors = stage.options.map((o) => o.name);
-  const dominance_scores: Record<string, number> = {};
-  for (const opt of stage.options) {
-    dominance_scores[opt.name] = Math.round(stage.weights[opt.name] ?? 10);
-  }
-  const zone_weights: Record<string, Record<string, number>> = {};
-
-  const { TransactionStatus, ExecutionResult } = await import("genlayer-js/types");
-  const client = await buildClient();
-
-  // Step 1 — submit_pick goes through full GenLayer AI consensus
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const txHash = await (client as any).writeContract({
-    address: VALIDATOR_CONTRACT_ADDRESS,
-    functionName: "submit_pick",
-    args: [BigInt(stage.id), candidate_colors, dominance_scores, zone_weights],
-  });
-
-  console.info(
-    `[MochiMind] submit_pick tx submitted  stage=${stage.id}  hash=${txHash}`,
-  );
-
-  // Step 2 — wait for GenLayer consensus (5 AI validators must agree)
-  // interval: 3 s, retries: 80 → up to ~4 min before giving up
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const receipt = await (client as any).waitForTransactionReceipt({
-    hash: txHash,
-    status: TransactionStatus.FINALIZED,
-    interval: 3000,
-    retries: 80,
-  });
-
-  // Step 3 — check execution didn't error
-  if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
-    throw new Error(
-      `Contract execution failed for stage ${stage.id}. receipt=${JSON.stringify(receipt.txExecutionResultName)}`,
-    );
-  }
-
-  // Step 4 — read the stored JSON result (purely deterministic — no AI calls)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rawResult = await (client as any).readContract({
-    address: VALIDATOR_CONTRACT_ADDRESS,
-    functionName: "get_last_result",
-    args: [],
-  });
-
-  const { colors, reasoning } = parseLastResult(rawResult);
-
-  if (!Array.isArray(colors) || colors.length < 2) {
-    throw new Error(
-      `Contract returned fewer than 2 colors from get_last_result. Got: ${JSON.stringify(colors)}`,
-    );
-  }
-
-  return {
-    picks: [colors[0], colors[1]],
-    scores: dominance_scores,
-    source: "onchain",
-    reasoning,
-    txHash: String(txHash),
-  };
 }
 
 function shortError(err: unknown): string {
-  if (!err) return "unknown";
-  const e = err as Record<string, unknown>;
-  const m = e["shortMessage"] ?? e["details"] ?? e["message"] ?? e["cause"];
-  if (typeof m === "string" && m) return m.replace(/\s+/g, " ").substring(0, 200);
-  try {
-    return JSON.stringify(err).substring(0, 200);
-  } catch {
-    return String(err).substring(0, 200);
-  }
+  if (err instanceof Error) return err.message.replace(/\s+/g, " ").slice(0, 200);
+  return String(err).slice(0, 200);
 }
 
-export async function validatorAnalyze(stage: Stage): Promise<ValidatorPick> {
+/**
+ * Play one round. `playerPicks` is sent to the contract so the round is recorded
+ * on-chain; when the player times out with no picks we fall back to a read-only
+ * analysis so the reveal still happens.
+ */
+export async function validatorAnalyze(
+  stage: Stage,
+  playerPicks: string[] = [],
+): Promise<ValidatorPick> {
+  // The contract requires exactly two distinct picks. A timed-out player has
+  // none, so pad with the first two options — the round still gets judged, and
+  // an empty player pick can never match the verdict anyway.
+  const picks =
+    playerPicks.length === 2
+      ? playerPicks
+      : stage.options.slice(0, 2).map((o) => o.name);
+
   try {
-    const result = await validatorAnalyzeOnChain(stage);
+    const result = await validatorAnalyzeOnChain(stage, picks);
     console.info(
-      `[MochiMind] GenLayer Studio ✓  stage=${stage.id}  picks=${result.picks.join(",")}`,
+      `[MochiMind] GenLayer ✓ stage=${stage.id} truth=${result.truth.join(",")} ai=${result.picks.join(",")}`,
     );
     return result;
   } catch (err) {
     console.warn(
-      `[MochiMind] Studio unavailable (stage ${stage.id}) → ${shortError(err)} — running local consensus`,
+      `[MochiMind] on-chain round failed (stage ${stage.id}) → ${shortError(err)} — using offline fallback`,
     );
     return validatorAnalyzeLocal(stage);
   }
