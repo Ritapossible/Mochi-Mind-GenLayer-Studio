@@ -288,14 +288,22 @@ class MochiMindValidator(gl.Contract):
         """
         prompt = self._build_prompt(options)
 
-        def leader_fn() -> dict:
+        def leader_fn() -> str:
             image_bytes = _fetch_image(image_url)
             raw = gl.nondet.exec_prompt(
                 prompt,
                 images=[image_bytes],
                 response_format="json",
             )
-            return _normalize(raw, options, image_bytes)
+            # Whatever a nondeterministic block returns is calldata encoded, and
+            # calldata has no float type — returning the verdict dict directly
+            # crashed the leader with
+            #   TypeError: not calldata encodable 22.0: float  (key 'confidence')
+            # which made every validator disagree, so the round settled without
+            # ever storing a verdict. Coverage percentages and the confidence
+            # gap are inherently fractional, so the verdict crosses the boundary
+            # as JSON text and is parsed back into a dict below.
+            return json.dumps(_normalize(raw, options, image_bytes), sort_keys=True)
 
         def validator_fn(leaders_res: gl.vm.Result) -> bool:
             # The validator does NOT inspect the leader's answer for shape and
@@ -304,11 +312,11 @@ class MochiMindValidator(gl.Contract):
             if not isinstance(leaders_res, gl.vm.Return):
                 return _handle_leader_error(leaders_res, leader_fn)
 
-            mine = leader_fn()
-            theirs = leaders_res.calldata
+            mine = json.loads(leader_fn())
+            theirs = json.loads(str(leaders_res.calldata))
             return _agree(theirs, mine, options)
 
-        verdict = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        verdict = json.loads(gl.vm.run_nondet_unsafe(leader_fn, validator_fn))
 
         # Everything below is deterministic post-processing of the consensus
         # result, so every node computes the same thing without another round.
