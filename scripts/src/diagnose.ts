@@ -28,7 +28,8 @@ async function main(): Promise<void> {
   const client = createClient({ chain: studionet, account: createAccount() });
   const address = CONTRACT as `0x${string}`;
 
-  const read = async (functionName: string, args: unknown[] = []) =>
+  // Every read here takes either no args or a single stage id.
+  const read = async (functionName: string, args: number[] = []) =>
     client.readContract({ address, functionName, args });
 
   console.log(`Contract: ${CONTRACT}`);
