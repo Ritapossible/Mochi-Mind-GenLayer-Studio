@@ -1,5 +1,6 @@
 {
-  "buildCommand": "cd ../.. && pnpm install && pnpm --filter @workspace/mochi-mind run build",
+  "installCommand": "if [ -f pnpm-workspace.yaml ]; then pnpm install --no-frozen-lockfile; else cd ../.. && pnpm install --no-frozen-lockfile; fi",
+  "buildCommand": "if [ -f pnpm-workspace.yaml ]; then pnpm --filter @workspace/mochi-mind run build; else cd ../.. && pnpm --filter @workspace/mochi-mind run build; fi",
   "outputDirectory": "dist/public",
   "framework": null,
   "rewrites": [
