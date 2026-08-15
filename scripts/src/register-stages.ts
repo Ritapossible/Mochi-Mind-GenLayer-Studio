@@ -153,27 +153,74 @@ async function main(): Promise<void> {
   // Finalized only means the network agreed on an outcome — that outcome can
   // still be a revert. Without this check a reverted registration printed
   // "Done. Registered stages: []" and exited 0, which reads as success.
-  if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
-    console.error(
-      `\nRegistration reverted on-chain. Contract returned:\n  ${JSON.stringify(
-        receipt.txExecutionResultName,
-      )}\n\nExplorer: https://explorer-studio.genlayer.com/tx/${txHash}`,
+  const bulkReverted =
+    receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR;
+
+  const readRegistered = async () =>
+    String(
+      await client.readContract({
+        address: CONTRACT as `0x${string}`,
+        functionName: "get_registered_stages",
+        args: [],
+      }),
     );
-    process.exit(1);
+
+  let registeredText = bulkReverted ? "[]" : await readRegistered();
+
+  // register_stages writes all 20 in one transaction, so it is all-or-nothing:
+  // a single bad entry, or the transaction hitting a size or gas ceiling, loses
+  // every stage and tells you nothing about which one. Fall back to registering
+  // them one at a time, where each failure names its own stage.
+  if (bulkReverted || registeredText === "[]" || registeredText === "") {
+    console.warn(
+      `\nBulk registration did not persist${
+        bulkReverted ? " (transaction reverted)" : ""
+      }. Retrying one stage at a time\nso the failing stage identifies itself ...\n`,
+    );
+
+    const failures: string[] = [];
+
+    for (const spec of specs) {
+      const label = `stage ${String(spec.stage_id).padStart(2, "0")}`;
+      try {
+        const oneTx = await client.writeContract({
+          address: CONTRACT as `0x${string}`,
+          functionName: "register_stage",
+          args: [spec.stage_id, spec.image_url, spec.options],
+          value: 0n,
+        });
+
+        const oneReceipt = await client.waitForTransactionReceipt({
+          hash: oneTx,
+          status: TransactionStatus.FINALIZED,
+          interval: 3000,
+          retries: 40,
+        });
+
+        if (oneReceipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
+          throw new Error("reverted on-chain");
+        }
+
+        console.log(`  ok   ${label}  tx ${oneTx}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`  FAIL ${label}  ${message.replace(/\s+/g, " ").slice(0, 200)}`);
+        failures.push(label);
+      }
+    }
+
+    registeredText = await readRegistered();
+
+    if (failures.length > 0) {
+      console.error(`\n${failures.length} stage(s) failed: ${failures.join(", ")}`);
+    }
   }
 
-  const registered = await client.readContract({
-    address: CONTRACT as `0x${string}`,
-    functionName: "get_registered_stages",
-    args: [],
-  });
-
-  const registeredText = String(registered);
   if (registeredText === "[]" || registeredText === "") {
     console.error(
-      `\nThe transaction finalized but the contract still reports no registered\n` +
-        `stages. Nothing was written — do not run warm-stages yet.\n\n` +
-        `Explorer: https://explorer-studio.genlayer.com/tx/${txHash}`,
+      `\nThe contract still reports no registered stages, so nothing was written.\n` +
+        `Do not run warm-stages yet — it will revert on every stage.\n\n` +
+        `Explorer: https://explorer-studio.genlayer.com/address/${CONTRACT}`,
     );
     process.exit(1);
   }
