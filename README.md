@@ -18,10 +18,23 @@ repository, in full. See [`contracts/README.md`](./contracts/README.md) for the 
 the equivalence principle, and deployment steps.
 
 ```text
-Contract address:  <pending redeploy — will be added here>
-Explorer:          https://explorer-studio.genlayer.com/address/<address>
+Contract address:  0x797fA4F809aFD1f2067cBf8ad8f6b3580ea4D655
+Explorer:          https://explorer-studio.genlayer.com/address/0x797fA4F809aFD1f2067cBf8ad8f6b3580ea4D655
 Network:           GenLayer Studio (studionet)
+Owner / deployer:  0xaA34e14a0e0B2fdD8Ad10F06bC0907fA0b1D02Bd
+Live game:         https://mochi-mind-gen.vercel.app
 ```
+
+All 20 stages are registered on this deployment. Every claim above is a read-only
+storage call — no key, no gas, no trust in this README:
+
+```bash
+GENLAYER_CONTRACT_ADDRESS=0x797fA4F809aFD1f2067cBf8ad8f6b3580ea4D655 \
+pnpm --filter @workspace/scripts diagnose
+```
+
+It prints the owner, the registered stage ids, the number of rounds played, and
+which stages already hold a cached verdict.
 
 > Studio validators must be configured with a **vision-capable model** (GPT-5,
 > Claude Sonnet). A text-only validator cannot see the image and every round will fail.
