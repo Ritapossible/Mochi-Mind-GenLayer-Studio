@@ -5,13 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
   ArrowRight, Brain, Check, Clock, ExternalLink, Lock, Play, RotateCcw,
-  Shield, ShieldAlert, ShieldCheck, Sparkles, Trophy, Wifi, Zap,
+  ShieldAlert, ShieldCheck, Sparkles, Trophy, Wifi, Zap,
 } from "lucide-react";
 import { STAGES, TURN_SECONDS, swatchFor, type Stage } from "@/game/stages";
 import { endgameTitle, scoreRound, validatorAnalyze, type RoundResult } from "@/game/validator";
-import {
-  bindStageImage, releaseBinding, shortDigest, type EvidenceBinding,
-} from "@/game/evidence";
+import { bindStageImage, releaseBinding, type EvidenceBinding } from "@/game/evidence";
 import {
   fetchPlayerRecord, getIdentity, hasChosenName, setDisplayName,
   type Identity, type PlayerRecord,
@@ -102,7 +100,13 @@ function PlayPage() {
     if (consensusTickRef.current) window.clearInterval(consensusTickRef.current);
   }
 
-  // Bind the picture to the contract's evidence whenever the stage changes.
+  // Bind the picture to the contract's evidence whenever the stage changes: the
+  // image on screen is fetched from the URL the contract registered and checked
+  // against the digest the validators judged, rather than being served from
+  // this app's own bundle on trust. The outcome is not surfaced in the UI — it
+  // decides which bytes get rendered, and `binding.status` is there for anyone
+  // who wants to show it.
+  //
   // The blob URL is revoked on the way out; leaking one per stage would pin
   // twenty images in memory for the length of a game.
   useEffect(() => {
@@ -664,63 +668,10 @@ function MochiArtCard({
       <div className="absolute bottom-2 right-2 sm:bottom-3 sm:right-3 text-[9px] sm:text-[10px] uppercase tracking-[0.25em] text-primary-foreground font-extrabold z-20 px-2 py-1 rounded-full bg-primary border-2 border-[color:var(--primary-deep)]">
         {"●".repeat(stage.difficulty)}{"○".repeat(5 - stage.difficulty)}
       </div>
-      <EvidenceBadge evidence={evidence} />
     </div>
   );
 }
 
-// ─── Evidence Badge ───────────────────────────────────────────────────────────
-
-/**
- * Says, on the image itself, whether this is provably the image the validators
- * judged. A mismatch is shown rather than swallowed — a silent fallback would
- * make the guarantee worthless.
- */
-function EvidenceBadge({ evidence }: { evidence: EvidenceBinding | null }) {
-  if (!evidence) {
-    return (
-      <div className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3 z-20 flex items-center gap-1 px-2 py-1 rounded-full bg-background/85 border-2 border-[color:var(--primary-deep)]/40 text-[9px] font-extrabold text-muted-foreground">
-        <Shield className="size-2.5 animate-pulse" /> Checking evidence…
-      </div>
-    );
-  }
-
-  const style = {
-    verified: {
-      icon: <ShieldCheck className="size-2.5 shrink-0" />,
-      label: `Evidence verified · ${shortDigest(evidence.sha256)}`,
-      className: "border-emerald-500/70 bg-emerald-50/95 text-emerald-800",
-    },
-    mismatch: {
-      icon: <ShieldAlert className="size-2.5 shrink-0" />,
-      label: "Image does not match the judged evidence",
-      className: "border-destructive/70 bg-destructive/10 text-destructive",
-    },
-    unjudged: {
-      icon: <Shield className="size-2.5 shrink-0" />,
-      label: "Contract image · not yet judged",
-      className: "border-amber-500/70 bg-amber-50/95 text-amber-800",
-    },
-    unbound: {
-      icon: <ShieldAlert className="size-2.5 shrink-0" />,
-      label: "Local image · not bound to the contract",
-      className: "border-violet-400/70 bg-violet-50/95 text-violet-700",
-    },
-  }[evidence.status];
-
-  return (
-    <div
-      title={
-        evidence.detail ??
-        `sha256 ${evidence.sha256}\nsource ${evidence.sourceUrl}`
-      }
-      className={`absolute bottom-2 left-2 sm:bottom-3 sm:left-3 z-20 flex items-center gap-1 max-w-[70%] px-2 py-1 rounded-full border-2 text-[9px] font-extrabold ${style.className}`}
-    >
-      {style.icon}
-      <span className="truncate">{style.label}</span>
-    </div>
-  );
-}
 
 // ─── Validator Panel ──────────────────────────────────────────────────────────
 
