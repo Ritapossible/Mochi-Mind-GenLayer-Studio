@@ -152,29 +152,36 @@ function PlayPage() {
     };
   }, [phase, validatorPicks]);
 
+  // The name gate is a modal over a live board, so "playing" is not enough to
+  // start the clock: the round only runs once the modal is gone. Otherwise the
+  // 20 s timer drains while the player is still typing their name, and the
+  // timeout locks in a round — a real, signed, on-chain round with placeholder
+  // picks — for a stage they never saw.
+  const roundActive = phase === "playing" && !showUsernameModal;
+
   // The updater only decrements. React may invoke an updater more than once, so
   // it has to stay pure — reaching zero is acted on by the effect below rather
   // than from inside setState.
   useEffect(() => {
-    if (phase !== "playing") return;
+    if (!roundActive) return;
     tickRef.current = window.setInterval(() => {
       setSecondsLeft((s) => (s <= 0 ? 0 : s - 1));
     }, 1000);
     return () => { if (tickRef.current) window.clearInterval(tickRef.current); };
-  }, [phase, stageIdx]);
+  }, [roundActive, stageIdx]);
 
   // Time ran out — lock in with no picks.
   useEffect(() => {
-    if (phase !== "playing" || secondsLeft > 0) return;
+    if (!roundActive || secondsLeft > 0) return;
     if (tickRef.current) window.clearInterval(tickRef.current);
     void handleLock(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, secondsLeft]);
+  }, [roundActive, secondsLeft]);
 
   useEffect(() => {
-    if (phase !== "playing") return;
+    if (!roundActive) return;
     if (secondsLeft <= 5 && secondsLeft > 0) playCountdownBeep(secondsLeft);
-  }, [secondsLeft, phase]);
+  }, [secondsLeft, roundActive]);
 
   useEffect(() => {
     if (phase !== "result") return;
@@ -184,7 +191,7 @@ function PlayPage() {
   }, [phase]);
 
   function togglePick(name: string) {
-    if (locked || phase !== "playing") return;
+    if (locked || !roundActive) return;
     setPlayerPicks((cur) => {
       if (cur.includes(name)) return cur.filter((c) => c !== name);
       if (cur.length >= 2) return cur;
@@ -193,6 +200,9 @@ function PlayPage() {
   }
 
   async function handleLock(timedOut = false) {
+    // Belt and braces: nothing should be able to submit a round while the
+    // player has not got past the name gate.
+    if (showUsernameModal) return;
     if (lockedRef.current) return;
     lockedRef.current = true;
     setLocked(true);
@@ -335,7 +345,7 @@ function PlayPage() {
                 "{stage.hint}"
               </p>
             </div>
-            <TimerChip seconds={secondsLeft} active={phase === "playing"} />
+            <TimerChip seconds={secondsLeft} active={roundActive} />
           </div>
 
           {/* Color picker */}
