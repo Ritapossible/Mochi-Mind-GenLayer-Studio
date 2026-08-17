@@ -18,18 +18,23 @@ repository, in full. See [`contracts/README.md`](./contracts/README.md) for the 
 the equivalence principle, and deployment steps.
 
 ```text
-Contract address:  0x797fA4F809aFD1f2067cBf8ad8f6b3580ea4D655
-Explorer:          https://explorer-studio.genlayer.com/address/0x797fA4F809aFD1f2067cBf8ad8f6b3580ea4D655
+Contract address:  0x6A7d19f5e540A7b4C5d67714b4D173d223b5b1b5
+Explorer:          https://explorer-studio.genlayer.com/address/0x6A7d19f5e540A7b4C5d67714b4D173d223b5b1b5
 Network:           GenLayer Studio (studionet)
 Owner / deployer:  0xaA34e14a0e0B2fdD8Ad10F06bC0907fA0b1D02Bd
 Live game:         https://mochi-mind-gen.vercel.app
 ```
 
+This deployment runs the contract as committed here — signed rounds, on-chain
+scoring and the evidence view included. The previous version lived at
+`0x797fA4F809aFD1f2067cBf8ad8f6b3580ea4D655`; contracts are immutable, so
+adding those required a new address, and nothing carried over from the old one.
+
 All 20 stages are registered on this deployment. Every claim above is a read-only
 storage call — no key, no gas, no trust in this README:
 
 ```bash
-GENLAYER_CONTRACT_ADDRESS=0x797fA4F809aFD1f2067cBf8ad8f6b3580ea4D655 \
+GENLAYER_CONTRACT_ADDRESS=0x6A7d19f5e540A7b4C5d67714b4D173d223b5b1b5 \
 pnpm --filter @workspace/scripts diagnose
 ```
 
@@ -45,23 +50,25 @@ which stages already hold a cached verdict.
 deterministic API that answers it, and no single party who should be trusted to answer
 it. That is the shape of problem GenLayer's Optimistic Democracy exists for.
 
-The caller supplies **only** the stage number and the player's two picks:
+The caller supplies the stage number, the player's two picks, and a signature
+proving whose picks they are:
 
 ```python
-submit_pick(stage_id, player_picks)
+submit_pick(stage_id, player_picks, player_id, player_name, nonce, signature)
 ```
 
 That is the entire payload. The image URL and the candidate colors are registered
 on-chain by the contract owner. Dominance is measured by a vision model looking at
 the actual PNG bytes. The player cannot supply the image, the candidates, the
-weights, or the answer.
+weights, the answer — or a score.
 
 ### Trust boundary
 
 | Owner | Responsibility |
 |---|---|
-| Frontend / backend | UI, blur animation, score display, leaderboard, and *submitting* the player's two picks |
-| **This contract** | The stage registry (image URL + candidate colors), the vision judgment over the real image, the validator comparison rule, and the stored verdict |
+| Frontend | UI, blur animation, signing the round with the player's own key, and checking the displayed image against the contract's evidence |
+| Backend | *Relaying* the signed round and paying its gas. Nothing else — it cannot forge, alter or replay a round |
+| **This contract** | The stage registry (image URL + candidate colors), the vision judgment over the real image, the validator comparison rule, the stored verdict, **who played the round**, and **every score on the leaderboard** |
 | External source | The raw PNG bytes, which every validator re-fetches and re-examines independently |
 
 ---
@@ -69,7 +76,10 @@ weights, or the answer.
 ## How a round works
 
 ```text
-submit_pick(stage_id, player_picks)
+submit_pick(stage_id, picks, player_id, name, nonce, signature)
+        │
+        ├─ recover the signer from the signed round message
+        │              must equal player_id, nonce must exceed their last one
         │
         ├─ look up the stage on-chain → image_url, candidate colors
         │
@@ -83,6 +93,7 @@ submit_pick(stage_id, player_picks)
         │
         ├─ consensus → final_colors  (ground truth for the round)
         ├─ derive    → ai_colors     (the opponent's move)
+        ├─ score     → set this stage's bit in the player's solved_mask
         └─ store     → verdict + append the round to the on-chain audit log
 ```
 
@@ -116,13 +127,18 @@ agreeing on broken state.
 | `register_stage(stage_id, image_url, options)` | write, owner | Pin one stage's image and candidate colors |
 | `register_stages(specs_json)` | write, owner | Same, in bulk — all 20 in one transaction |
 | `analyze_stage(stage_id)` | write, owner | Force a fresh consensus round over the image |
-| `submit_pick(stage_id, player_picks)` | write | Play a round; uses the cached verdict if one exists |
+| `submit_pick(stage_id, picks, player_id, name, nonce, signature)` | write | Play a signed round; scores it against the verdict |
 | `transfer_ownership(new_owner)` | write, owner | Hand over admin |
 | `get_stage_result(stage_id)` | view | Cached verdict JSON for a stage |
 | `get_last_result()` | view | Most recent verdict JSON |
 | `get_stage(stage_id)` | view | Registered image URL + candidate colors |
+| `get_stage_evidence(stage_id)` | view | Image URL + SHA-256 the client binds the display to |
 | `get_registered_stages()` | view | JSON array of registered stage ids |
 | `get_round_count()` / `get_round(i)` | view | On-chain audit log of played rounds |
+| `get_player(player_id)` | view | One player's record, derived from their rounds |
+| `get_player_nonce(player_id)` | view | Last nonce used; the next round must exceed it |
+| `get_player_count()` | view | How many players have a record |
+| `get_leaderboard(limit)` | view | Ranked player records, computed on-chain |
 | `get_owner()` | view | Current owner address |
 
 Verdict shape:
@@ -146,8 +162,8 @@ Verdict shape:
 
 ## Addressing the previous review
 
-This submission was previously rejected on two counts. Both are fixed, and both are
-verifiable from the repository.
+This submission has been through three rounds of review. Every point raised is
+fixed, and every fix is verifiable from the repository.
 
 **1. "The submitted repository does not include the Intelligent Contract source
 described in the README."**
@@ -181,10 +197,60 @@ reading the same client-supplied answer key.
 **Now** the contract fetches the actual PNG over https and a vision model measures
 per-color surface coverage from the pixels. Every validator re-fetches the same image
 and re-judges it independently before the round settles. The weights table has been
-deleted — there is no `weights` anywhere in the repository, and the only thing the
-client sends is `(stage_id, player_picks)`.
+deleted — there is no `weights` anywhere in the repository.
 
 The evidence the validators evaluate is the image itself.
+
+**3. "Consensus determines the round answer, but player identity, scoring, and
+the leaderboard still rely on a shared signer and client-submitted data. For a
+stronger version, bind the displayed image to the contract evidence and derive
+authenticated competitive results from contract rounds."**
+
+Also correct, and both halves are now closed.
+
+*Identity and scoring.* Every round used to be signed by one server key, so the
+audit log credited all of them to the relayer, and the score was counted in
+JavaScript and POSTed to a table that accepted any number from any caller. Now
+the browser holds its own secp256k1 key and signs
+`(domain, player, stage, picks, nonce, name)` before the round leaves it. The
+contract recovers the address itself — GenVM has no `ecrecover`, so
+`_keccak256` and `_ecrecover` are implemented in the contract — and rejects any
+round whose signature does not match the claimed player, along with any nonce
+that does not exceed that player's last one. The relayer pays the gas and can do
+nothing else. The score is then computed on-chain as a bit per solved stage, and
+`get_leaderboard` ranks those records. `POST /api/leaderboard` answers
+`410 Gone`; there is nothing to submit a score to.
+
+*The displayed image.* The game used to render its own bundled copy of
+`stage-NN.png` and assert in this README that it was the file the validators
+fetched. Nothing checked that. Now the browser asks the contract for the
+evidence (`get_stage_evidence` → URL, candidate colors, SHA-256), fetches those
+bytes from that URL, hashes them with WebCrypto, renders the bytes it hashed,
+and labels the image on screen: **Evidence verified · 9f2c…**, or a visible
+mismatch warning. The candidate colors come from the same read, because those
+are the only names `submit_pick` will accept.
+
+Both are verifiable without running the game:
+
+```bash
+pnpm --filter @workspace/scripts sign-vectors   # sign fixtures with the game's own signer
+python contracts/tests/test_signed_rounds.py    # verify them with the contract's own code
+```
+
+And against the live deployment, which is the only place the last question —
+does secp256k1 recovery in pure Python actually run inside GenVM — can be
+answered:
+
+```bash
+GENLAYER_CONTRACT_ADDRESS=0x6A7d19f5e540A7b4C5d67714b4D173d223b5b1b5 \
+GENLAYER_PRIVATE_KEY=0x... \
+pnpm --filter @workspace/scripts test-round 1
+```
+
+It plays a stage as a player nobody has seen before, then tries to forge a round
+for someone else and to replay one — both of which the contract rejects. The
+run against this deployment is quoted in
+[`contracts/README.md`](./contracts/README.md).
 
 ---
 
@@ -195,17 +261,20 @@ Mochi-Mind-GenLayer-Studio/
 │
 ├── contracts/
 │   ├── MochiMindValidator.py     # the Intelligent Contract
+│   ├── tests/                    # signature vectors + the test that checks them
 │   └── README.md                 # design notes + deployment guide
 │
 ├── artifacts/
 │   ├── mochi-mind/               # React frontend (Vite, TanStack Router)
 │   │   ├── public/stages/        # the 20 stage PNGs the validators fetch
-│   │   └── src/game/             # stages, validator client, sounds
-│   └── api-server/               # Express API — holds the GenLayer signing key
-│       └── src/routes/           # validator, leaderboard, health
+│   │   ├── api/                  # Vercel functions — relay, reads, no write path to scores
+│   │   └── src/game/             # stages, identity (signing), evidence (image binding)
+│   └── api-server/               # Express API — holds the gas key, relays signed rounds
+│       └── src/routes/           # validator, player, leaderboard, health
 │
 ├── scripts/
-│   └── src/register-stages.ts    # registers all 20 stages on-chain
+│   ├── src/register-stages.ts    # registers all 20 stages on-chain
+│   └── src/sign-vectors.ts       # signs the fixtures the contract test verifies
 │
 ├── lib/                          # shared workspace packages
 └── screenshots/
@@ -241,8 +310,11 @@ prefixed `VITE_` is inlined into the browser bundle and is public:
 GENLAYER_CONTRACT_ADDRESS=0x...
 GENLAYER_PRIVATE_KEY=0x...     # must be the contract owner — analyze_stage is owner-only
 GENLAYER_RPC_URL=              # optional, defaults to studionet
-DATABASE_URL=postgres://...    # Neon connection string, for the leaderboard
 ```
+
+The leaderboard needs no database. It is read from the contract, so there is no
+`DATABASE_URL` any more — if you deployed an earlier version, that variable and
+the `leaderboard` table are now unused.
 
 `GENLAYER_PRIVATE_KEY` is also the spender wallet: it pays the gas for every player's
 round, so nobody needs a wallet to play. Use a throwaway account funded only for gas.
@@ -285,13 +357,9 @@ the frontend must exist before the stages can be registered.
    The script fetches every image first and refuses to register anything if one is
    unreachable or returns HTML instead of a PNG.
 4. **Set the server-side variables in Vercel** (Settings → Environment Variables):
-   `GENLAYER_CONTRACT_ADDRESS`, `GENLAYER_PRIVATE_KEY`, and `DATABASE_URL`. Leave
+   `GENLAYER_CONTRACT_ADDRESS` and `GENLAYER_PRIVATE_KEY`. Leave
    `VITE_API_BASE_URL` unset. Redeploy so the functions pick them up.
-5. **Create the leaderboard table:**
-   ```bash
-   DATABASE_URL=postgres://... pnpm --filter @workspace/db push
-   ```
-6. **Warm every stage** so players never wait on a cold consensus round:
+5. **Warm every stage** so players never wait on a cold consensus round:
    ```bash
    GENLAYER_CONTRACT_ADDRESS=0x... \
    GENLAYER_PRIVATE_KEY=0x... \
@@ -300,12 +368,16 @@ the frontend must exist before the stages can be registered.
    This takes 60–120 s per unjudged stage and runs on your machine, where nothing
    can time it out. Skip it and the first player to reach each stage waits through
    the round in-browser instead.
-7. **Verify end to end:**
+6. **Verify end to end:**
    ```bash
    curl https://your-app.vercel.app/api/validator/status
    curl https://your-app.vercel.app/api/validator/stage/1
+   curl https://your-app.vercel.app/api/leaderboard
    ```
-   The second call should return `"ready": true` once the stage is warm.
+   The second call should return `"ready": true` once the stage is warm, along
+   with the `evidence` block the browser binds the displayed image to. The third
+   returns the contract's leaderboard — empty until someone plays, and not
+   writable at all.
 
 ### Why the API is split into submit + poll
 

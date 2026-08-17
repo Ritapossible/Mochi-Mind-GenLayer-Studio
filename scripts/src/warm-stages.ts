@@ -22,7 +22,9 @@
 
 import { createAccount, createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
-import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
+import { TransactionStatus } from "genlayer-js/types";
+
+import { executionError } from "./receipt";
 
 const TOTAL_STAGES = 20;
 
@@ -87,14 +89,18 @@ async function main(): Promise<void> {
       const receipt = await client.waitForTransactionReceipt({
         hash: txHash,
         status: TransactionStatus.FINALIZED,
-        interval: 3000,
-        retries: 80,
+        // Studio allows 30 RPC calls a minute per client. Polling a 60-120 s
+        // round every 3 s spends 20-40 of them on one receipt, so the script
+        // starts reporting rate-limit errors as though the round had failed.
+        interval: 6000,
+        retries: 60,
       });
 
       // Finalized can still mean reverted — an unregistered stage fails here.
-      if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
+      const reverted = executionError(receipt);
+      if (reverted) {
         throw new Error(
-          "reverted on-chain (is the stage registered? run register-stages first)",
+          `reverted on-chain: ${reverted} (is the stage registered? run register-stages first)`,
         );
       }
 

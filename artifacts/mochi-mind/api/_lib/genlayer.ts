@@ -99,6 +99,29 @@ function parseVerdict(raw: unknown): StageVerdict | null {
   }
 }
 
+/** Parse a JSON string returned by a view method, whatever wrapper it arrives in. */
+function parseJsonRead(raw: unknown): unknown {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "object") return raw;
+
+  const text = String(raw);
+  if (!text || text === "{}") return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function readView(functionName: string, args: unknown[]): Promise<unknown> {
+  const client = await getClient();
+  return client.readContract({
+    address: CONTRACT_ADDRESS as `0x${string}`,
+    functionName,
+    args,
+  });
+}
+
 /** Deterministic storage read — no consensus round, returns in milliseconds. */
 export async function readStageVerdict(stageId: number): Promise<StageVerdict | null> {
   const client = await getClient();
@@ -108,6 +131,111 @@ export async function readStageVerdict(stageId: number): Promise<StageVerdict | 
     args: [stageId],
   });
   return parseVerdict(raw);
+}
+
+/** The evidence registry entry for a stage: what the validators were pointed at. */
+export type StageEvidence = {
+  stageId: number;
+  registered: boolean;
+  imageUrl?: string;
+  options?: string[];
+  imageSha256?: string;
+  imageBytes?: number;
+  judged?: boolean;
+};
+
+type RawEvidence = {
+  stage_id?: number;
+  registered?: boolean;
+  image_url?: string;
+  options?: string[];
+  image_sha256?: string;
+  image_bytes?: number;
+  judged?: boolean;
+};
+
+/**
+ * Read what the contract registered as the evidence for a stage.
+ *
+ * This is what lets the browser prove the picture on screen is the picture the
+ * validators judged: the URL they fetched, and the SHA-256 of the bytes they
+ * saw. Both come from contract storage, never from the client or this server.
+ */
+export async function readStageEvidence(stageId: number): Promise<StageEvidence> {
+  const parsed = parseJsonRead(await readView("get_stage_evidence", [stageId])) as RawEvidence | null;
+
+  if (!parsed || !parsed.registered) {
+    return { stageId, registered: false };
+  }
+
+  return {
+    stageId,
+    registered: true,
+    imageUrl: parsed.image_url,
+    options: Array.isArray(parsed.options) ? parsed.options : undefined,
+    imageSha256: parsed.image_sha256 || undefined,
+    imageBytes: parsed.image_bytes,
+    judged: Boolean(parsed.judged),
+  };
+}
+
+/** One player's record, as the contract computed it from their rounds. */
+export type PlayerRecord = {
+  player: string;
+  name: string;
+  score: number;
+  aiScore: number;
+  rounds: number;
+  total: number;
+  nonce: number;
+  lastRound: number;
+  lastStage: number;
+  rank?: number;
+};
+
+type RawPlayer = {
+  player?: string;
+  name?: string;
+  score?: number;
+  ai_score?: number;
+  rounds?: number;
+  total?: number;
+  nonce?: number;
+  last_round?: number;
+  last_stage?: number;
+  rank?: number;
+};
+
+function toPlayerRecord(raw: RawPlayer, fallbackAddress: string): PlayerRecord {
+  return {
+    player: String(raw.player ?? fallbackAddress).toLowerCase(),
+    name: String(raw.name ?? ""),
+    score: Number(raw.score ?? 0),
+    aiScore: Number(raw.ai_score ?? 0),
+    rounds: Number(raw.rounds ?? 0),
+    total: Number(raw.total ?? 0),
+    nonce: Number(raw.nonce ?? 0),
+    lastRound: Number(raw.last_round ?? 0),
+    lastStage: Number(raw.last_stage ?? 0),
+    ...(raw.rank === undefined ? {} : { rank: Number(raw.rank) }),
+  };
+}
+
+export async function readPlayer(address: string): Promise<PlayerRecord> {
+  const parsed = parseJsonRead(await readView("get_player", [address])) as RawPlayer | null;
+  return toPlayerRecord(parsed ?? {}, address);
+}
+
+/**
+ * The leaderboard, computed by the contract from its own round log.
+ *
+ * Nothing is posted to this board. A score exists because the contract scored a
+ * signed round against a consensus verdict and set a bit for that stage.
+ */
+export async function readLeaderboard(limit: number): Promise<PlayerRecord[]> {
+  const parsed = parseJsonRead(await readView("get_leaderboard", [limit]));
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((entry) => toPlayerRecord(entry as RawPlayer, ""));
 }
 
 /**

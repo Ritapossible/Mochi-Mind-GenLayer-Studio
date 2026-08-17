@@ -1,0 +1,109 @@
+{
+  "domain": "MochiMind v2",
+  "vectors": [
+    {
+      "description": "first round, plain name",
+      "address": "0x03e4e69521d09d94c204e166549795866fd9ad92",
+      "stageId": 1,
+      "picks": [
+        "Yellow",
+        "Orange"
+      ],
+      "name": "rita",
+      "nonce": 0,
+      "message": "MochiMind v2\nplayer:0x03e4e69521d09d94c204e166549795866fd9ad92\nstage:1\npicks:Yellow|Orange\nnonce:0\nname:rita",
+      "signature": "0x2eebb9bc76ae5bc95338a27d455c03bff2c89d83e04fb2e86d74bd64e961b7285c5dba94f221caa09c0c88d56077b7b730c74ba3a267cee525d9f642c76f2d481b"
+    },
+    {
+      "description": "millisecond-timestamp nonce",
+      "address": "0x16cf727948f8a6ff7deaffeb175edda2830d0903",
+      "stageId": 7,
+      "picks": [
+        "Gray",
+        "Blue"
+      ],
+      "name": "RitaCryptoTips",
+      "nonce": 1767225600123,
+      "message": "MochiMind v2\nplayer:0x16cf727948f8a6ff7deaffeb175edda2830d0903\nstage:7\npicks:Gray|Blue\nnonce:1767225600123\nname:RitaCryptoTips",
+      "signature": "0x2e36492790c7fb09af1282b7827723ce74c0128066ec2185e6ef44a03e81d3c502778fe6673184ae1bc02febd4bf1fe7412c5b8767f299a4a84dd49c19a02b371b"
+    },
+    {
+      "description": "color name containing a space",
+      "address": "0xf41d600e82c450c1827468adbda718a28f119164",
+      "stageId": 8,
+      "picks": [
+        "Neon Green",
+        "Black"
+      ],
+      "name": "player-two",
+      "nonce": 42,
+      "message": "MochiMind v2\nplayer:0xf41d600e82c450c1827468adbda718a28f119164\nstage:8\npicks:Neon Green|Black\nnonce:42\nname:player-two",
+      "signature": "0xc4e7e1f2d73845b613ed9421cccc7488be927b150c6d283bd4d3a2f54eab524256302506b1382bd7abf5b882bd9e1b9a3d2c739aa2d658870d2dfee1d38b3a311c"
+    },
+    {
+      "description": "picks in reverse order",
+      "address": "0x93df9ae32a89c189534be1ebf14f00387cca16e4",
+      "stageId": 8,
+      "picks": [
+        "Black",
+        "Neon Green"
+      ],
+      "name": "player-two",
+      "nonce": 43,
+      "message": "MochiMind v2\nplayer:0x93df9ae32a89c189534be1ebf14f00387cca16e4\nstage:8\npicks:Black|Neon Green\nnonce:43\nname:player-two",
+      "signature": "0x8df32232bb56d79bb9b539632b09bee90310d0b951bf47bc79357aeb28fffdc946d133269c1f830b40cdb93d266a84bff76ee297138e747d1b512a0e6bbc599b1b"
+    },
+    {
+      "description": "unicode display name",
+      "address": "0x043f8d7add1957e04ab8dcc7bd01785e046e9d89",
+      "stageId": 20,
+      "picks": [
+        "Purple",
+        "White"
+      ],
+      "name": "リタ 🍡",
+      "nonce": 99,
+      "message": "MochiMind v2\nplayer:0x043f8d7add1957e04ab8dcc7bd01785e046e9d89\nstage:20\npicks:Purple|White\nnonce:99\nname:リタ 🍡",
+      "signature": "0x0055cd52647b6c651543a85d3a5cb323ca5a67d71d23ec96d3ca6ef8c4bc7f785ed0d35e73f4af5127e58f27703066a04882c4744c39fb16dea5371076ffa22e1c"
+    },
+    {
+      "description": "name at the 32-character limit",
+      "address": "0x34195f07838fba48349d98cfd67841898d7e410c",
+      "stageId": 15,
+      "picks": [
+        "White",
+        "Silver"
+      ],
+      "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "nonce": 7,
+      "message": "MochiMind v2\nplayer:0x34195f07838fba48349d98cfd67841898d7e410c\nstage:15\npicks:White|Silver\nnonce:7\nname:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "signature": "0x3eef7f321344e595763fd51357543fb8cfff52058acc127be5f0c18d288d787d4ae4c2db7bc98b542d22882659443567601983ec45441221dc7c42cbaf94c1d61c"
+    },
+    {
+      "description": "anonymous player",
+      "address": "0x2956d165f61b8950fd19d948466ee7eff18d68d7",
+      "stageId": 3,
+      "picks": [
+        "Blue",
+        "Cyan"
+      ],
+      "name": "Anonymous",
+      "nonce": 1,
+      "message": "MochiMind v2\nplayer:0x2956d165f61b8950fd19d948466ee7eff18d68d7\nstage:3\npicks:Blue|Cyan\nnonce:1\nname:Anonymous",
+      "signature": "0x9ea06359b0bb74173122c5352e03b49eed6f69000668d423ae785aa43bcc2a4329072f98d1b800594c8442202037851e75ac99e21868619eb67fefd1044b5bdd1c"
+    },
+    {
+      "description": "highest stage id",
+      "address": "0x6ecb76426ef39af5098735841ba6377a3e54a7da",
+      "stageId": 20,
+      "picks": [
+        "Purple",
+        "Lavender"
+      ],
+      "name": "edge",
+      "nonce": 1099511627776,
+      "message": "MochiMind v2\nplayer:0x6ecb76426ef39af5098735841ba6377a3e54a7da\nstage:20\npicks:Purple|Lavender\nnonce:1099511627776\nname:edge",
+      "signature": "0x6b2aeef76d63d4bc5067089f21c48e6044c85e904809406ffdde87f9f260c48e7ba6bbcfeb44341d9cfd2f6010833a0f8d70def9eaa75eb77bca333c4fa3a37e1c"
+    }
+  ]
+}

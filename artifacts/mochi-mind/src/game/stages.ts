@@ -57,6 +57,21 @@ const C = {
 
 const sw = (n: keyof typeof C): ColorSwatch => ({ name: n, hex: C[n] });
 
+/** The palette, by name. Used to render candidate colors the contract returns. */
+export const COLOR_HEX: Record<string, string> = C;
+
+/**
+ * A swatch for a color name that came from the contract's stage registry.
+ *
+ * The registry is authoritative about *which* colors a stage offers — those are
+ * the only names `submit_pick` accepts. This file is authoritative only about
+ * what each name looks like, and falls back to a neutral gray for a name it
+ * does not know rather than dropping the option.
+ */
+export function swatchFor(name: string): ColorSwatch {
+  return { name, hex: COLOR_HEX[name] ?? "#94A3B8" };
+}
+
 // Deterministic seeded shuffle so the option order stays stable per stage
 // across renders, but each stage scatters its correct answers differently.
 function shuffle<T>(arr: T[], seed: number): T[] {

@@ -5,10 +5,17 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
   ArrowRight, Brain, Check, Clock, ExternalLink, Lock, Play, RotateCcw,
-  Sparkles, Trophy, Wifi, Zap,
+  Shield, ShieldAlert, ShieldCheck, Sparkles, Trophy, Wifi, Zap,
 } from "lucide-react";
-import { STAGES, TURN_SECONDS, type Stage } from "@/game/stages";
+import { STAGES, TURN_SECONDS, swatchFor, type Stage } from "@/game/stages";
 import { endgameTitle, scoreRound, validatorAnalyze, type RoundResult } from "@/game/validator";
+import {
+  bindStageImage, releaseBinding, shortDigest, type EvidenceBinding,
+} from "@/game/evidence";
+import {
+  fetchPlayerRecord, getIdentity, hasChosenName, setDisplayName,
+  type Identity, type PlayerRecord,
+} from "@/game/identity";
 import {
   playCountdownBeep, playLockIn, playRevealWhoosh,
   playCardChime, playResultFanfare,
@@ -22,30 +29,14 @@ export const Route = createFileRoute("/play")({
 
 type Phase = "playing" | "revealing" | "result" | "endgame";
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
-
-async function submitScore(username: string, score: number, total: number) {
-  try {
-    await fetch(`${API_BASE}/api/leaderboard`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, score, total }),
-    });
-  } catch {
-    // silent — leaderboard submission is best-effort
-  }
-}
-
 function PlayPage() {
   const navigate = useNavigate();
 
-  // Discord username gate — shown before first game
-  const [discordUsername, setDiscordUsername] = useState<string>(
-    () => localStorage.getItem("mochimind_discord") ?? "",
-  );
-  const [showUsernameModal, setShowUsernameModal] = useState<boolean>(
-    () => !localStorage.getItem("mochimind_discord"),
-  );
+  // Identity: a key this browser holds, which signs every round. The name is
+  // just a label attached to it — the address is what the contract credits.
+  // There is no score to submit anywhere: the contract scores the signed rounds.
+  const [identity, setIdentity] = useState<Identity>(() => getIdentity());
+  const [showUsernameModal, setShowUsernameModal] = useState<boolean>(() => !hasChosenName());
 
   const [stageIdx, setStageIdx] = useState(0);
   const [phase, setPhase] = useState<Phase>("playing");
@@ -55,6 +46,9 @@ function PlayPage() {
   const [validatorPicks, setValidatorPicks] = useState<[string, string] | null>(null);
   const [validatorFetchMs, setValidatorFetchMs] = useState<number | null>(null);
   const [validatorSource, setValidatorSource] = useState<"onchain" | "local-consensus" | null>(null);
+  // False when the verdict came from the chain but the signed round could not
+  // be relayed — the reveal is honest, the score just was not counted.
+  const [roundRecorded, setRoundRecorded] = useState<boolean | null>(null);
   const [validatorTxHash, setValidatorTxHash] = useState<string | null>(null);
   // Ground truth for the round, as returned by the Intelligent Contract. Null
   // until the reveal lands; `stage.correct` is only the offline fallback.
@@ -72,11 +66,23 @@ function PlayPage() {
   // a real on-chain transaction.
   const lockedRef = useRef(false);
 
+  // The image the contract registered for this stage, fetched and hashed in the
+  // browser so what is on screen can be checked against what was judged.
+  const [evidence, setEvidence] = useState<EvidenceBinding | null>(null);
+
   const stage = STAGES[stageIdx];
   const total = STAGES.length;
   // Before the reveal there is no on-chain verdict yet, so the local answer
   // stands in. After it lands, the contract's verdict is what counts.
   const truth = truthColors ?? stage.correct;
+
+  // The candidate colors come from the contract's stage registry when it can be
+  // read: those are the only names `submit_pick` will accept, so offering
+  // anything else would be offering a pick that cannot be played.
+  const options = useMemo(
+    () => (evidence?.options?.length ? evidence.options.map(swatchFor) : stage.options),
+    [evidence, stage],
+  );
 
   function resetStage() {
     setPhase("playing");
@@ -87,6 +93,7 @@ function PlayPage() {
     setValidatorPicks(null);
     setValidatorFetchMs(null);
     setValidatorSource(null);
+    setRoundRecorded(null);
     setValidatorTxHash(null);
     setTruthColors(null);
     setRoundResult(null);
@@ -94,6 +101,38 @@ function PlayPage() {
     setConsensusElapsed(0);
     if (consensusTickRef.current) window.clearInterval(consensusTickRef.current);
   }
+
+  // Bind the picture to the contract's evidence whenever the stage changes.
+  // The blob URL is revoked on the way out; leaking one per stage would pin
+  // twenty images in memory for the length of a game.
+  useEffect(() => {
+    let cancelled = false;
+    let bound: EvidenceBinding | null = null;
+
+    setEvidence(null);
+    void bindStageImage(stage.id).then((binding) => {
+      if (cancelled) {
+        releaseBinding(binding);
+        return;
+      }
+      bound = binding;
+      setEvidence(binding);
+    });
+
+    return () => {
+      cancelled = true;
+      releaseBinding(bound);
+    };
+  }, [stage.id]);
+
+  // If the contract's candidate list arrives after the player has already
+  // chosen, drop any pick that is not on it. `submit_pick` rejects a color the
+  // stage does not offer, so keeping one would cost the player their round.
+  useEffect(() => {
+    if (phase !== "playing" || !evidence?.options?.length) return;
+    const allowed = new Set(evidence.options);
+    setPlayerPicks((cur) => (cur.every((p) => allowed.has(p)) ? cur : cur.filter((p) => allowed.has(p))));
+  }, [evidence, phase]);
 
   // Count up seconds while waiting for on-chain consensus
   useEffect(() => {
@@ -166,12 +205,17 @@ function PlayPage() {
     playRevealWhoosh();
 
     const t0 = performance.now();
-    const v = await validatorAnalyze(stage, timedOut ? [] : playerPicks);
+    const v = await validatorAnalyze(
+      stage,
+      timedOut ? [] : playerPicks,
+      options.map((o) => o.name),
+    );
     const elapsed = Math.round(performance.now() - t0);
     setValidatorPicks(v.picks);
     setTruthColors(v.truth);
     setValidatorFetchMs(elapsed);
     setValidatorSource(v.source);
+    setRoundRecorded(v.source === "onchain" ? v.recorded !== false : false);
     if (v.txHash) setValidatorTxHash(v.txHash);
 
     // Brief pause so the validator chips animate in before result cards flip
@@ -181,11 +225,11 @@ function PlayPage() {
       setValidatorScore((s) => s + r.validator);
       setRoundResult(r.result);
       setPhase("result");
-      stage.options.forEach((_, i) => {
-        const isCorrect = v.truth.includes(stage.options[i].name);
+      options.forEach((opt, i) => {
+        const isCorrect = v.truth.includes(opt.name);
         window.setTimeout(() => playCardChime(isCorrect, 0), i * 150 + 80);
       });
-      window.setTimeout(() => playResultFanfare(r.result), stage.options.length * 150 + 480);
+      window.setTimeout(() => playResultFanfare(r.result), options.length * 150 + 480);
     }, 900);
   }
 
@@ -208,7 +252,7 @@ function PlayPage() {
         playerScore={playerScore}
         validatorScore={validatorScore}
         total={total}
-        discordUsername={discordUsername}
+        identity={identity}
         onRestart={restart}
         onHome={() => navigate({ to: "/" })}
         onLeaderboard={() => navigate({ to: "/leaderboard" })}
@@ -225,7 +269,8 @@ function PlayPage() {
       {showUsernameModal && (
         <DiscordModal
           onConfirm={(name) => {
-            setDiscordUsername(name);
+            setDisplayName(name);
+            setIdentity(getIdentity());
             setShowUsernameModal(false);
           }}
         />
@@ -278,7 +323,7 @@ function PlayPage() {
         {/* LEFT — game area */}
         <section className="space-y-3">
           {/* Mochi art */}
-          <MochiArtCard stage={stage} blurred={blurred} />
+          <MochiArtCard stage={stage} blurred={blurred} evidence={evidence} />
 
           {/* Hint + Timer row */}
           <div className="flex items-center gap-2">
@@ -307,7 +352,7 @@ function PlayPage() {
                   transition={{ duration: 0.18 }}
                   className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3"
                 >
-                  {stage.options.map((opt) => {
+                  {options.map((opt) => {
                     const selected = playerPicks.includes(opt.name);
                     return (
                       <button
@@ -343,7 +388,7 @@ function PlayPage() {
                   animate={{ opacity: 1 }}
                   className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3"
                 >
-                  {stage.options.map((opt, i) => {
+                  {options.map((opt, i) => {
                     const isCorrect = truth.includes(opt.name);
                     const wasSelected = playerPicks.includes(opt.name);
                     return (
@@ -441,6 +486,7 @@ function PlayPage() {
             quote={stage.quote}
             consensusElapsed={consensusElapsed}
             txHash={validatorTxHash}
+            recorded={roundRecorded}
           />
         </aside>
       </div>
@@ -563,8 +609,13 @@ function ValidatorFetchChip({
 
 // ─── Mochi Art Card ───────────────────────────────────────────────────────────
 
-function MochiArtCard({ stage, blurred }: { stage: Stage; blurred: boolean }) {
-  const stageImg = STAGE_IMAGES[stage.id];
+function MochiArtCard({
+  stage, blurred, evidence,
+}: { stage: Stage; blurred: boolean; evidence: EvidenceBinding | null }) {
+  // Render the bytes that were fetched from the contract's registered URL and
+  // hashed, not the bundled copy — otherwise the digest below would be
+  // vouching for an image nobody is actually looking at.
+  const stageImg = evidence?.src ?? STAGE_IMAGES[stage.id];
   return (
     <div className="relative aspect-[4/3] sm:aspect-[16/9] rounded-2xl sm:rounded-3xl overflow-hidden border-[4px] border-[color:var(--primary-deep)] bg-secondary shadow-card-chunky">
       <motion.div
@@ -603,6 +654,60 @@ function MochiArtCard({ stage, blurred }: { stage: Stage; blurred: boolean }) {
       <div className="absolute bottom-2 right-2 sm:bottom-3 sm:right-3 text-[9px] sm:text-[10px] uppercase tracking-[0.25em] text-primary-foreground font-extrabold z-20 px-2 py-1 rounded-full bg-primary border-2 border-[color:var(--primary-deep)]">
         {"●".repeat(stage.difficulty)}{"○".repeat(5 - stage.difficulty)}
       </div>
+      <EvidenceBadge evidence={evidence} />
+    </div>
+  );
+}
+
+// ─── Evidence Badge ───────────────────────────────────────────────────────────
+
+/**
+ * Says, on the image itself, whether this is provably the image the validators
+ * judged. A mismatch is shown rather than swallowed — a silent fallback would
+ * make the guarantee worthless.
+ */
+function EvidenceBadge({ evidence }: { evidence: EvidenceBinding | null }) {
+  if (!evidence) {
+    return (
+      <div className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3 z-20 flex items-center gap-1 px-2 py-1 rounded-full bg-background/85 border-2 border-[color:var(--primary-deep)]/40 text-[9px] font-extrabold text-muted-foreground">
+        <Shield className="size-2.5 animate-pulse" /> Checking evidence…
+      </div>
+    );
+  }
+
+  const style = {
+    verified: {
+      icon: <ShieldCheck className="size-2.5 shrink-0" />,
+      label: `Evidence verified · ${shortDigest(evidence.sha256)}`,
+      className: "border-emerald-500/70 bg-emerald-50/95 text-emerald-800",
+    },
+    mismatch: {
+      icon: <ShieldAlert className="size-2.5 shrink-0" />,
+      label: "Image does not match the judged evidence",
+      className: "border-destructive/70 bg-destructive/10 text-destructive",
+    },
+    unjudged: {
+      icon: <Shield className="size-2.5 shrink-0" />,
+      label: "Contract image · not yet judged",
+      className: "border-amber-500/70 bg-amber-50/95 text-amber-800",
+    },
+    unbound: {
+      icon: <ShieldAlert className="size-2.5 shrink-0" />,
+      label: "Local image · not bound to the contract",
+      className: "border-violet-400/70 bg-violet-50/95 text-violet-700",
+    },
+  }[evidence.status];
+
+  return (
+    <div
+      title={
+        evidence.detail ??
+        `sha256 ${evidence.sha256}\nsource ${evidence.sourceUrl}`
+      }
+      className={`absolute bottom-2 left-2 sm:bottom-3 sm:left-3 z-20 flex items-center gap-1 max-w-[70%] px-2 py-1 rounded-full border-2 text-[9px] font-extrabold ${style.className}`}
+    >
+      {style.icon}
+      <span className="truncate">{style.label}</span>
     </div>
   );
 }
@@ -611,6 +716,7 @@ function MochiArtCard({ stage, blurred }: { stage: Stage; blurred: boolean }) {
 
 function ValidatorPanel({
   phase, picks, correct, result, playerPicks, fetchMs, source, quote, consensusElapsed, txHash,
+  recorded,
 }: {
   phase: Phase;
   picks: [string, string] | null;
@@ -622,6 +728,7 @@ function ValidatorPanel({
   quote?: string;
   consensusElapsed: number;
   txHash: string | null;
+  recorded: boolean | null;
 }) {
   return (
     <div className="rounded-2xl sm:rounded-3xl bg-card border-[3px] border-[color:var(--primary-deep)] shadow-card-chunky p-4 sm:p-5 lg:sticky lg:top-[88px]">
@@ -704,6 +811,15 @@ function ValidatorPanel({
             <Row label="Your pick" colors={playerPicks} correct={correct} />
             <Row label="AI pick" colors={picks} correct={correct} />
             <Row label="Truth" colors={correct} correct={correct} highlight />
+            {recorded === false && (
+              <div className="flex items-start gap-1.5 rounded-xl border-2 border-amber-500/60 bg-amber-50 px-2.5 py-2 text-[10px] font-bold text-amber-800">
+                <ShieldAlert className="size-3 mt-0.5 shrink-0" />
+                <span>
+                  This round was not recorded on-chain, so it does not count towards
+                  your contract score.
+                </span>
+              </div>
+            )}
             {quote && (
               <p className="hidden lg:block text-xs italic text-muted-foreground pt-1 border-t border-[color:var(--primary-deep)]/20">
                 "{quote}"
@@ -769,23 +885,49 @@ function Row({ label, colors, correct, highlight = false }: {
 // ─── Endgame Screen ───────────────────────────────────────────────────────────
 
 function EndgameScreen({
-  playerScore, validatorScore, total, discordUsername, onRestart, onHome, onLeaderboard,
+  playerScore, validatorScore, total, identity, onRestart, onHome, onLeaderboard,
 }: {
   playerScore: number;
   validatorScore: number;
   total: number;
-  discordUsername: string;
+  identity: Identity;
   onRestart: () => void;
   onHome: () => void;
   onLeaderboard: () => void;
 }) {
   const title = endgameTitle(playerScore, validatorScore, total);
+  const [record, setRecord] = useState<PlayerRecord | null>(null);
+  const [settling, setSettling] = useState(true);
 
-  // Submit score once on mount
+  // Read the score the *contract* holds for this player. The tally above is the
+  // browser's own count of the game just played; this is what the leaderboard
+  // ranks, and the only number anybody else can verify.
+  //
+  // The last rounds may still be settling when this screen opens, so poll
+  // briefly rather than showing a stale total once and leaving it there.
   useEffect(() => {
-    if (discordUsername) {
-      void submitScore(discordUsername, playerScore, total);
+    let cancelled = false;
+    let attempts = 0;
+
+    async function poll() {
+      const next = await fetchPlayerRecord(identity.address);
+      if (cancelled) return;
+      if (next) setRecord(next);
+
+      attempts += 1;
+      if (next && next.score >= playerScore) {
+        setSettling(false);
+        return;
+      }
+      if (attempts >= 10) {
+        setSettling(false);
+        return;
+      }
+      window.setTimeout(() => void poll(), 6_000);
     }
+
+    void poll();
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -824,11 +966,31 @@ function EndgameScreen({
           ))}
         </div>
 
-        {discordUsername && (
-          <div className="mb-4 sm:mb-6 rounded-xl border-2 border-[color:var(--primary-deep)]/30 bg-secondary px-4 py-2.5 text-xs text-center text-muted-foreground">
-            Score submitted to leaderboard as <span className="font-extrabold text-primary">{discordUsername}</span>
+        {/* On-chain record. Nothing here was submitted — it is what the contract
+            scored from the rounds this browser signed. */}
+        <div className="mb-4 sm:mb-6 rounded-xl border-2 border-[color:var(--primary-deep)]/30 bg-secondary px-4 py-3 text-xs text-muted-foreground space-y-1.5">
+          <div className="flex items-center justify-center gap-1.5 font-extrabold uppercase tracking-[0.2em] text-[10px] text-primary">
+            <ShieldCheck className="size-3" /> On-chain record
           </div>
-        )}
+          <div className="text-center">
+            <span className="font-extrabold text-primary">{identity.name}</span>
+            <span className="opacity-70"> · {identity.address.slice(0, 6)}…{identity.address.slice(-4)}</span>
+          </div>
+          {record ? (
+            <div className="text-center">
+              Contract score{" "}
+              <span className="font-extrabold text-primary tabular-nums">
+                {record.score}/{record.total || total}
+              </span>{" "}
+              over {record.rounds} signed round{record.rounds === 1 ? "" : "s"}
+              {settling && <span className="opacity-70"> · still settling…</span>}
+            </div>
+          ) : (
+            <div className="text-center opacity-70">
+              {settling ? "Reading your record from the contract…" : "No on-chain record yet."}
+            </div>
+          )}
+        </div>
 
         <div className="flex flex-col gap-3">
           <Button variant="hero" size="lg" className="rounded-full w-full" onClick={onLeaderboard}>
@@ -857,7 +1019,8 @@ function DiscordModal({ onConfirm }: { onConfirm: (username: string) => void }) 
     e.preventDefault();
     const trimmed = value.trim();
     if (!trimmed) return;
-    localStorage.setItem("mochimind_discord", trimmed);
+    // Persisting is `setDisplayName`'s job — it normalizes the name to what the
+    // contract will accept and to what gets signed into every round.
     onConfirm(trimmed);
   }
 
@@ -875,7 +1038,9 @@ function DiscordModal({ onConfirm }: { onConfirm: (username: string) => void }) 
           </div>
           <h2 className="text-xl sm:text-2xl font-black tracking-tight mb-1">Ready to play?</h2>
           <p className="text-sm text-muted-foreground leading-relaxed">
-            Enter your Discord username to appear on the <span className="font-bold text-primary">global leaderboard</span> after completing all 20 stages.
+            Enter your Discord username to appear on the <span className="font-bold text-primary">global leaderboard</span>.
+            Your rounds are signed by a key this browser holds, and the contract
+            scores them — no wallet, and nothing to submit.
           </p>
         </div>
 

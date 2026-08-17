@@ -1,61 +1,47 @@
+// The leaderboard, read from the contract.
+//
+// This route used to keep `leaderboard.json` next to the process and accept a
+// POST of `{ username, score, total }` from anyone who could reach it. A score
+// was whatever the caller said it was, and no row was tied to a round that had
+// been played.
+//
+// Now it mirrors the serverless function: `get_leaderboard` ranks player
+// records the contract built from signed rounds it scored itself, and there is
+// nothing to post to.
+
 import { Router, type IRouter } from "express";
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { join } from "path";
-
-const STORE_PATH = join(process.cwd(), "leaderboard.json");
-
-type Entry = {
-  username: string;
-  score: number;
-  total: number;
-  date: string;
-};
-
-function readEntries(): Entry[] {
-  try {
-    if (!existsSync(STORE_PATH)) return [];
-    return JSON.parse(readFileSync(STORE_PATH, "utf-8")) as Entry[];
-  } catch {
-    return [];
-  }
-}
-
-function writeEntries(entries: Entry[]): void {
-  writeFileSync(STORE_PATH, JSON.stringify(entries, null, 2), "utf-8");
-}
+import { isConfigured, readLeaderboard } from "../lib/genlayer";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
-router.get("/leaderboard", (_req, res) => {
-  const entries = readEntries();
-  const sorted = entries
-    .sort((a, b) => b.score - a.score || new Date(b.date).getTime() - new Date(a.date).getTime())
-    .slice(0, 50);
-  res.json(sorted);
-});
+const BOARD_SIZE = 50;
 
-router.post("/leaderboard", (req, res) => {
-  const { username, score, total } = req.body as Record<string, unknown>;
+function shortError(err: unknown): string {
+  if (err instanceof Error) return err.message.replace(/\s+/g, " ").slice(0, 300);
+  return String(err).slice(0, 300);
+}
 
-  if (
-    typeof username !== "string" ||
-    !username.trim() ||
-    typeof score !== "number" ||
-    typeof total !== "number"
-  ) {
-    res.status(400).json({ error: "Invalid payload" });
+router.get("/leaderboard", async (_req, res) => {
+  // Not configured yet: an empty board keeps the page rendering.
+  if (!isConfigured()) {
+    res.json([]);
     return;
   }
 
-  const entries = readEntries();
-  entries.push({
-    username: username.trim().slice(0, 32),
-    score,
-    total,
-    date: new Date().toISOString(),
+  try {
+    res.json(await readLeaderboard(BOARD_SIZE));
+  } catch (err) {
+    logger.warn({ err: shortError(err) }, "leaderboard read failed");
+    res.status(502).json({ error: shortError(err) });
+  }
+});
+
+router.post("/leaderboard", (_req, res) => {
+  res.status(410).json({
+    error:
+      "scores are no longer submitted. Play a signed round — the contract scores it and this board is derived from that.",
   });
-  writeEntries(entries);
-  res.json({ ok: true });
 });
 
 export default router;

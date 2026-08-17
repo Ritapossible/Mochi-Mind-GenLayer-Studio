@@ -19,7 +19,9 @@
 
 import { createAccount, createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
-import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
+import { TransactionStatus } from "genlayer-js/types";
+
+import { executionError } from "./receipt";
 
 // Mirrors artifacts/mochi-mind/src/game/stages.ts. Kept as plain data so this
 // script has no dependency on the frontend build.
@@ -153,8 +155,7 @@ async function main(): Promise<void> {
   // Finalized only means the network agreed on an outcome — that outcome can
   // still be a revert. Without this check a reverted registration printed
   // "Done. Registered stages: []" and exited 0, which reads as success.
-  const bulkReverted =
-    receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR;
+  const bulkReverted = executionError(receipt) !== null;
 
   const readRegistered = async () =>
     String(
@@ -197,9 +198,8 @@ async function main(): Promise<void> {
           retries: 40,
         });
 
-        if (oneReceipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
-          throw new Error("reverted on-chain");
-        }
+        const reverted = executionError(oneReceipt);
+        if (reverted) throw new Error(`reverted on-chain: ${reverted}`);
 
         console.log(`  ok   ${label}  tx ${oneTx}`);
       } catch (err) {

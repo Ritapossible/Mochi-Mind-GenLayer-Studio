@@ -8,6 +8,8 @@
     "register-stages": "tsx ./src/register-stages.ts",
     "warm-stages": "tsx ./src/warm-stages.ts",
     "diagnose": "tsx ./src/diagnose.ts",
+    "sign-vectors": "tsx ./src/sign-vectors.ts",
+    "test-round": "tsx ./src/test-round.ts",
     "inspect-round": "tsx ./src/inspect-round.ts",
     "deploy-contract": "tsx ./src/deploy-contract.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"

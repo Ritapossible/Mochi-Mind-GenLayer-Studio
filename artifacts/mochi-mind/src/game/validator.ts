@@ -1,10 +1,16 @@
 // MochiMind — Validator AI client.
 //
-// The browser no longer talks to GenLayer directly and no longer holds a
-// signing key. It posts the player's two picks to our API server, which owns
-// the key and drives the Intelligent Contract:
+// The browser posts the player's two picks to our API server, which pays the gas
+// and drives the Intelligent Contract:
 //
 //   browser ──POST /api/validator/submit──> serverless fn ──> GenLayer Studio
+//     │                                        (relayer, holds the gas key)
+//     └─ signs the round with the player's own key first
+//
+// The server is a relayer, not an authority. The round carries the player's
+// signature over (domain, player, stage, picks, nonce, name); the contract
+// recovers the address and rejects anything the relayer altered, invented, or
+// re-sent. See ./identity.
 //
 // The contract does the work that matters: it fetches the stage PNG over https,
 // shows it to a vision model, and has every validator independently re-fetch and
@@ -18,6 +24,7 @@
 //
 // Contract: contracts/MochiMindValidator.py
 
+import { signRound } from "./identity";
 import type { Stage } from "./stages";
 
 // Empty by default: the API is served from this same Vercel deployment under
@@ -44,6 +51,8 @@ export type ValidatorPick = {
   confidence?: number;
   txHash?: string;
   imageUrl?: string;
+  /** True once the signed round has been relayed for on-chain scoring. */
+  recorded?: boolean;
 };
 
 /** The shaped verdict both /submit and /stage/:id return once one exists. */
@@ -63,6 +72,8 @@ type SubmitResponse = {
   ready: boolean;
   result?: RoundResultPayload | null;
   txHash?: string | null;
+  /** False when the verdict was served but the signed round could not be relayed. */
+  recorded?: boolean;
 };
 
 function pair(colors: string[] | undefined, fallback: [string, string]): [string, string] {
@@ -115,7 +126,12 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   }
 }
 
-function toPick(data: RoundResultPayload, stage: Stage, txHash?: string | null): ValidatorPick {
+function toPick(
+  data: RoundResultPayload,
+  stage: Stage,
+  txHash?: string | null,
+  recorded?: boolean,
+): ValidatorPick {
   const truth = pair(data.truth, stage.correct);
   return {
     picks: pair(data.picks, truth),
@@ -126,6 +142,7 @@ function toPick(data: RoundResultPayload, stage: Stage, txHash?: string | null):
     confidence: data.confidence,
     txHash: data.txHash ?? txHash ?? undefined,
     imageUrl: data.imageUrl,
+    recorded,
   };
 }
 
@@ -137,15 +154,26 @@ async function validatorAnalyzeOnChain(
 ): Promise<ValidatorPick> {
   const deadline = Date.now() + ROUND_DEADLINE_MS;
 
+  // Signed before it leaves the browser: what the relayer forwards is the
+  // player's claim, not the relayer's word for it.
+  const signed = await signRound(stage.id, playerPicks);
+
   const submitted = await requestJson<SubmitResponse>(`${API_BASE}/api/validator/submit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ stageId: stage.id, picks: playerPicks }),
+    body: JSON.stringify({
+      stageId: stage.id,
+      picks: playerPicks,
+      playerId: signed.playerId,
+      name: signed.name,
+      nonce: signed.nonce,
+      signature: signed.signature,
+    }),
   });
 
   // Warm stage: the verdict was already on-chain, so it came back immediately.
   if (submitted.ready && submitted.result) {
-    return toPick(submitted.result, stage, submitted.txHash);
+    return toPick(submitted.result, stage, submitted.txHash, submitted.recorded);
   }
 
   // Cold stage: validators are still reaching consensus over the image. Poll
@@ -158,7 +186,7 @@ async function validatorAnalyzeOnChain(
     ).catch(() => null);
 
     if (polled?.ready && polled.result) {
-      return toPick(polled.result, stage, submitted.txHash);
+      return toPick(polled.result, stage, submitted.txHash, submitted.recorded);
     }
   }
 
@@ -178,14 +206,14 @@ function shortError(err: unknown): string {
 export async function validatorAnalyze(
   stage: Stage,
   playerPicks: string[] = [],
+  candidates?: string[],
 ): Promise<ValidatorPick> {
-  // The contract requires exactly two distinct picks. A timed-out player has
-  // none, so pad with the first two options — the round still gets judged, and
-  // an empty player pick can never match the verdict anyway.
-  const picks =
-    playerPicks.length === 2
-      ? playerPicks
-      : stage.options.slice(0, 2).map((o) => o.name);
+  // The contract requires exactly two distinct picks, drawn from the candidates
+  // it registered for the stage. A timed-out player has none, so pad with the
+  // first two — the round still gets judged, and an empty player pick can never
+  // match the verdict anyway.
+  const names = candidates?.length ? candidates : stage.options.map((o) => o.name);
+  const picks = playerPicks.length === 2 ? playerPicks : names.slice(0, 2);
 
   try {
     const result = await validatorAnalyzeOnChain(stage, picks);

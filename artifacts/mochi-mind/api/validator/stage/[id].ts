@@ -2,10 +2,16 @@
 //
 // Returns in milliseconds, which is what makes the submit-then-poll flow work
 // inside Vercel's function time limit.
+//
+// It also carries the stage's evidence — the image URL the validators were
+// pointed at and the SHA-256 of the bytes they judged — because the browser
+// needs both to prove the picture it is rendering is the picture that was
+// judged. See artifacts/mochi-mind/src/game/evidence.ts.
 
 import type { VercelRequest, VercelResponse } from "../../_lib/http.js";
 import {
   isConfigured,
+  readStageEvidence,
   readStageVerdict,
   shortError,
   toResponse,
@@ -26,11 +32,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const verdict = await readStageVerdict(stageId);
+    // Both are cheap storage reads; running them together keeps the poll to a
+    // single round trip while a stage is still cold.
+    const [verdict, evidence] = await Promise.all([
+      readStageVerdict(stageId),
+      readStageEvidence(stageId).catch(() => ({ stageId, registered: false })),
+    ]);
+
     res.status(200).json({
       stageId,
       ready: verdict !== null,
       result: verdict ? toResponse(stageId, verdict, { cached: true }) : null,
+      evidence,
     });
   } catch (err) {
     res.status(502).json({ error: shortError(err) });

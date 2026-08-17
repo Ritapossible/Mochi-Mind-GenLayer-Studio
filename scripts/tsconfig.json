@@ -2,7 +2,11 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src",
+    // The repo root, not ./src: sign-vectors.ts imports the game's canonical
+    // round-message builder so the fixtures it generates are produced by the
+    // same code that signs real rounds. These scripts run through tsx and emit
+    // nothing, so this only widens what tsc will accept as an input.
+    "rootDir": "..",
     "types": ["node"]
   },
   "include": ["src"]

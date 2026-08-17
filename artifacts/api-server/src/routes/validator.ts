@@ -3,9 +3,12 @@ import {
   analyzeStage,
   contractAddress,
   isConfigured,
+  readPlayer,
+  readStageEvidence,
   readStageVerdict,
   submitPick,
   type AnalyzeOutcome,
+  type SignedRound,
   type StageVerdict,
 } from "../lib/genlayer";
 import { logger } from "../lib/logger";
@@ -14,13 +17,48 @@ const router: IRouter = Router();
 
 const TOTAL_STAGES = 20;
 const PICKS_PER_ROUND = 2;
+const MAX_NAME = 32;
 
 /**
- * A consensus round costs 60–120 s of wall clock. Two players hitting the same
- * stage at the same moment should share one round rather than start two, so
- * in-flight requests are keyed by stage and joined.
+ * A consensus round costs 60–120 s of wall clock, so two players reaching the
+ * same cold stage at once should not both pay for one.
+ *
+ * They are queued rather than joined: each carries its own player's signature
+ * and has to reach the contract as its own round, but the second waits for the
+ * first, by which time the verdict is cached and the round settles quickly.
  */
-const inFlight = new Map<number, Promise<AnalyzeOutcome>>();
+const stageQueue = new Map<number, Promise<unknown>>();
+
+function queueForStage(stageId: number, run: () => Promise<AnalyzeOutcome>): Promise<AnalyzeOutcome> {
+  const prior = stageQueue.get(stageId) ?? Promise.resolve();
+  const next = prior.then(run, run);
+  // Swallow rejections on the queued copy only: the caller still sees the error.
+  stageQueue.set(stageId, next.catch(() => undefined));
+  return next;
+}
+
+/**
+ * Shape-check the player's claim.
+ *
+ * The signature is deliberately not verified here — the contract recovers the
+ * address itself, and a check in this process would prove nothing about what
+ * lands on-chain.
+ */
+function parseSignedRound(body: Record<string, unknown>): SignedRound | null {
+  const playerId = String(body.playerId ?? "").trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(playerId)) return null;
+
+  const name = String(body.name ?? "").trim();
+  if (!name || name.length > MAX_NAME || /[\r\n]/.test(name)) return null;
+
+  const nonce = Number(body.nonce);
+  if (!Number.isSafeInteger(nonce) || nonce < 0) return null;
+
+  const signature = String(body.signature ?? "").trim();
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) return null;
+
+  return { playerId, name, nonce, signature };
+}
 
 function parseStageId(raw: unknown): number | null {
   const id = Number(raw);
@@ -70,13 +108,20 @@ router.get("/validator/stage/:id", async (req, res) => {
   }
 
   try {
-    const verdict = await readStageVerdict(stageId);
+    // The evidence rides along so the browser can prove the image it is
+    // rendering is the image the validators judged.
+    const [verdict, evidence] = await Promise.all([
+      readStageVerdict(stageId),
+      readStageEvidence(stageId).catch(() => ({ stageId, registered: false })),
+    ]);
+
     res.json({
       stageId,
       ready: verdict !== null,
       result: verdict
         ? toResponse(stageId, { verdict, cached: true, elapsedMs: 0 })
         : null,
+      evidence,
     });
   } catch (err) {
     logger.warn({ stageId, err: shortError(err) }, "verdict read failed");
@@ -85,11 +130,12 @@ router.get("/validator/stage/:id", async (req, res) => {
 });
 
 /**
- * Play a round. The player sends only their two picks — the image, the
- * candidate colors and the answer all live on-chain.
+ * Relay a round. The player sends their two picks and a signature over them —
+ * the image, the candidate colors, the answer and the score all live on-chain.
  */
 router.post("/validator/submit", async (req, res) => {
-  const { stageId: rawStage, picks: rawPicks } = req.body as Record<string, unknown>;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const { stageId: rawStage, picks: rawPicks } = body;
 
   const stageId = parseStageId(rawStage);
   if (stageId === null) {
@@ -103,24 +149,55 @@ router.post("/validator/submit", async (req, res) => {
     return;
   }
 
+  const claim = parseSignedRound(body);
+  if (!claim) {
+    res.status(400).json({
+      error: "playerId, name, nonce and signature are required to record a round",
+    });
+    return;
+  }
+
   if (!isConfigured()) {
     res.status(503).json({ error: "GenLayer is not configured on this server" });
     return;
   }
 
   try {
-    let pending = inFlight.get(stageId);
-    if (!pending) {
-      pending = submitPick(stageId, picks).finally(() => inFlight.delete(stageId));
-      inFlight.set(stageId, pending);
-    }
-
-    const outcome = await pending;
+    const outcome = await queueForStage(stageId, () => submitPick(stageId, picks, claim));
     // This server is long-running, so unlike the serverless path it can wait
     // out a full consensus round and always answers ready:true.
-    res.json({ ready: true, result: toResponse(stageId, outcome) });
+    res.json({ ready: true, recorded: true, result: toResponse(stageId, outcome) });
   } catch (err) {
-    logger.warn({ stageId, err: shortError(err) }, "submit_pick failed");
+    logger.warn(
+      { stageId, player: claim.playerId, err: shortError(err) },
+      "submit_pick failed",
+    );
+    res.status(502).json({ error: shortError(err) });
+  }
+});
+
+/**
+ * One player's record, straight from contract storage.
+ *
+ * The browser needs the last nonce before signing its next round, and the
+ * endgame screen shows the score the contract holds rather than the one the
+ * browser counted.
+ */
+router.get("/player/:address", async (req, res) => {
+  const address = String(req.params.address ?? "").trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(address)) {
+    res.status(400).json({ error: "address must be a 0x player address" });
+    return;
+  }
+  if (!isConfigured()) {
+    res.status(503).json({ error: "GenLayer is not configured on this server" });
+    return;
+  }
+
+  try {
+    res.json(await readPlayer(address));
+  } catch (err) {
+    logger.warn({ address, err: shortError(err) }, "player read failed");
     res.status(502).json({ error: shortError(err) });
   }
 });

@@ -13,6 +13,12 @@
 //
 // Run `pnpm --filter @workspace/scripts warm-stages` after registering the
 // stages and every stage becomes a warm stage for good.
+//
+// This function is a relayer. It pays the gas so the player needs no wallet,
+// and that is the whole of its authority: the round arrives already signed by
+// the player's key, and the contract recovers the address itself. Everything
+// checked here is a shape check to avoid spending gas on a round the contract
+// is certain to reject — none of it is trusted on-chain.
 
 import type { VercelRequest, VercelResponse } from "../_lib/http.js";
 import {
@@ -25,6 +31,9 @@ import {
 
 const TOTAL_STAGES = 20;
 const PICKS_PER_ROUND = 2;
+const MAX_NAME = 32;
+/** 65 bytes: r, s, v. */
+const SIGNATURE_HEX_LENGTH = 132;
 
 function parseStageId(raw: unknown): number | null {
   const id = Number(raw);
@@ -38,6 +47,37 @@ function parsePicks(raw: unknown): string[] | null {
   if (picks.length !== PICKS_PER_ROUND) return null;
   if (picks[0] === picks[1]) return null;
   return picks;
+}
+
+type SignedRound = {
+  playerId: string;
+  name: string;
+  nonce: number;
+  signature: string;
+};
+
+/**
+ * Shape-check the player's claim.
+ *
+ * The signature is deliberately not verified here. Doing so would prove nothing
+ * the contract does not prove for itself, and would invite the assumption that
+ * a round is trustworthy because this server said so.
+ */
+function parseSignedRound(body: Record<string, unknown>): SignedRound | null {
+  const playerId = String(body.playerId ?? "").trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(playerId)) return null;
+
+  const name = String(body.name ?? "").trim();
+  if (!name || name.length > MAX_NAME || /[\r\n]/.test(name)) return null;
+
+  const nonce = Number(body.nonce);
+  if (!Number.isSafeInteger(nonce) || nonce < 0) return null;
+
+  const signature = String(body.signature ?? "").trim();
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) return null;
+  if (signature.length !== SIGNATURE_HEX_LENGTH) return null;
+
+  return { playerId, name, nonce, signature };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -60,6 +100,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
+  const claim = parseSignedRound(body);
+  if (!claim) {
+    res.status(400).json({
+      error: "playerId, name, nonce and signature are required to record a round",
+    });
+    return;
+  }
+
   if (!isConfigured()) {
     res.status(503).json({ error: "GenLayer is not configured on this server" });
     return;
@@ -72,7 +120,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // their answer when we already hold a consensus verdict for the stage.
     let txHash: string | null = null;
     try {
-      txHash = await broadcast("submit_pick", [stageId, picks]);
+      txHash = await broadcast("submit_pick", [
+        stageId,
+        picks,
+        claim.playerId,
+        claim.name,
+        claim.nonce,
+        claim.signature,
+      ]);
     } catch (err) {
       if (!cached) throw err;
     }
@@ -80,6 +135,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (cached) {
       res.status(200).json({
         ready: true,
+        // A verdict we could serve, but a round we could not relay, is not a
+        // scored round — the endgame reads its score from the contract, so say so.
+        recorded: txHash !== null,
         result: toResponse(stageId, cached, { txHash, cached: true }),
       });
       return;
@@ -87,6 +145,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     res.status(202).json({
       ready: false,
+      recorded: txHash !== null,
       stageId,
       txHash,
       pollUrl: `/api/validator/stage/${stageId}`,

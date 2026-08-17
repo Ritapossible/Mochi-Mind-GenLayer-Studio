@@ -1,7 +1,14 @@
+// The leaderboard, as the contract computes it.
+//
+// Nothing on this page was posted by a browser. Each row is a player record the
+// Intelligent Contract built from signed rounds it scored itself against
+// consensus verdicts, ranked on-chain by `get_leaderboard`. The API function
+// behind it is a read; there is no write path to this board any more.
+
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Trophy, ArrowLeft, Medal, Crown, RefreshCw } from "lucide-react";
+import { Trophy, ArrowLeft, Medal, Crown, RefreshCw, ShieldCheck, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import logo from "@/assets/logo.jpg";
 
@@ -10,11 +17,19 @@ export const Route = createFileRoute("/leaderboard")({
 });
 
 type Entry = {
-  username: string;
+  /** Player address — the identity the contract credited the rounds to. */
+  player: string;
+  name: string;
+  /** Distinct stages solved, from the contract's solved-stage bitmask. */
   score: number;
+  /** How the Validator AI did on the same stages. */
+  aiScore: number;
+  rounds: number;
   total: number;
-  date: string;
+  rank?: number;
 };
+
+type Status = { contract: string | null; explorer: string | null };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 
@@ -22,6 +37,16 @@ async function fetchLeaderboard(): Promise<Entry[]> {
   const res = await fetch(`${API_BASE}/api/leaderboard`);
   if (!res.ok) throw new Error("Failed to fetch leaderboard");
   return res.json() as Promise<Entry[]>;
+}
+
+async function fetchStatus(): Promise<Status | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/validator/status`);
+    if (!res.ok) return null;
+    return (await res.json()) as Status;
+  } catch {
+    return null;
+  }
 }
 
 function RankIcon({ rank }: { rank: number }) {
@@ -35,12 +60,14 @@ function RankIcon({ rank }: { rank: number }) {
   );
 }
 
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+function shortAddress(address: string) {
+  if (!address.startsWith("0x") || address.length < 12) return address;
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
 function LeaderboardPage() {
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [status, setStatus] = useState<Status | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,7 +80,10 @@ function LeaderboardPage() {
       .finally(() => setLoading(false));
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    void fetchStatus().then(setStatus);
+  }, []);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -90,6 +120,23 @@ function LeaderboardPage() {
           <p className="text-muted-foreground text-sm sm:text-base">
             Top MochiMind players competing against Validator AI
           </p>
+
+          {/* Provenance. The whole point of this board is that it is checkable. */}
+          <div className="mt-4 inline-flex flex-wrap items-center justify-center gap-1.5 px-3 py-1.5 rounded-full border-2 border-emerald-500/50 bg-emerald-50/70 text-[10px] sm:text-[11px] font-extrabold text-emerald-800">
+            <ShieldCheck className="size-3 shrink-0" />
+            Scored on-chain from signed rounds — nothing is submitted
+            {status?.explorer && (
+              <a
+                href={status.explorer}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 underline underline-offset-2 hover:opacity-80"
+              >
+                <ExternalLink className="size-2.5" />
+                {status.contract ? shortAddress(status.contract) : "contract"}
+              </a>
+            )}
+          </div>
         </motion.div>
 
         {/* Content */}
@@ -110,7 +157,7 @@ function LeaderboardPage() {
           <div className="rounded-2xl border-[3px] border-[color:var(--primary-deep)]/30 bg-card p-10 text-center shadow-card-chunky">
             <div className="text-4xl mb-3">🎮</div>
             <h3 className="font-extrabold text-lg mb-1">No scores yet</h3>
-            <p className="text-sm text-muted-foreground mb-4">Be the first to complete all 20 stages!</p>
+            <p className="text-sm text-muted-foreground mb-4">Be the first to solve a stage on-chain!</p>
             <Button variant="hero" className="rounded-full" asChild>
               <Link to="/play">Play Now</Link>
             </Button>
@@ -120,12 +167,14 @@ function LeaderboardPage() {
         {!loading && !error && entries.length > 0 && (
           <div className="space-y-2 sm:space-y-3">
             {entries.map((entry, i) => {
-              const rank = i + 1;
-              const pct = Math.round((entry.score / entry.total) * 100);
+              const rank = entry.rank ?? i + 1;
+              const total = entry.total || 20;
+              const pct = total > 0 ? Math.round((entry.score / total) * 100) : 0;
               const isTop3 = rank <= 3;
+              const label = entry.name || shortAddress(entry.player);
               return (
                 <motion.div
-                  key={`${entry.username}-${entry.date}`}
+                  key={entry.player}
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: Math.min(i * 0.05, 0.5) }}
@@ -144,21 +193,23 @@ function LeaderboardPage() {
                   <div className={`h-9 w-9 sm:h-10 sm:w-10 rounded-xl border-2 grid place-items-center text-sm font-black shrink-0
                     ${isTop3 ? "border-[color:var(--primary-deep)] bg-primary text-primary-foreground" : "border-[color:var(--primary-deep)]/40 bg-secondary text-primary"}`}
                   >
-                    {entry.username.slice(0, 2).toUpperCase()}
+                    {label.slice(0, 2).toUpperCase()}
                   </div>
 
-                  {/* Name + date */}
+                  {/* Name + identity */}
                   <div className="flex-1 min-w-0">
-                    <div className="font-extrabold truncate text-sm sm:text-base">{entry.username}</div>
-                    <div className="text-[10px] sm:text-xs text-muted-foreground">{formatDate(entry.date)}</div>
+                    <div className="font-extrabold truncate text-sm sm:text-base">{label}</div>
+                    <div className="text-[10px] sm:text-xs text-muted-foreground font-mono truncate">
+                      {shortAddress(entry.player)} · {entry.rounds} round{entry.rounds === 1 ? "" : "s"} · AI {entry.aiScore}
+                    </div>
                   </div>
 
                   {/* Score */}
                   <div className="text-right shrink-0">
                     <div className={`text-lg sm:text-xl font-black tabular-nums ${isTop3 ? "text-primary" : "text-foreground"}`}>
-                      {entry.score}<span className="text-muted-foreground font-bold text-sm">/{entry.total}</span>
+                      {entry.score}<span className="text-muted-foreground font-bold text-sm">/{total}</span>
                     </div>
-                    <div className="text-[10px] sm:text-xs font-bold text-muted-foreground">{pct}% accuracy</div>
+                    <div className="text-[10px] sm:text-xs font-bold text-muted-foreground">{pct}% of stages</div>
                   </div>
                 </motion.div>
               );

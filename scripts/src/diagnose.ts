@@ -16,6 +16,8 @@ import { createAccount, createClient } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 
 const TOTAL_STAGES = 20;
+/** Studio rate-limits a client to 30 RPC calls per minute. Stay under it. */
+const RPC_PACE_MS = 2_500;
 
 const CONTRACT = process.env.GENLAYER_CONTRACT_ADDRESS;
 if (!CONTRACT) {
@@ -54,7 +56,39 @@ async function main(): Promise<void> {
     /* fall through — printed raw above */
   }
 
-  console.log(`round count:        ${String(await read("get_round_count"))}\n`);
+  console.log(`round count:        ${String(await read("get_round_count"))}`);
+
+  // Competitive state. Both of these are computed by the contract from signed
+  // rounds it scored itself — there is no path that writes a score to it.
+  try {
+    console.log(`players:            ${String(await read("get_player_count"))}`);
+
+    const board = JSON.parse(String(await read("get_leaderboard", [3]))) as Array<{
+      name?: string;
+      player?: string;
+      score?: number;
+      total?: number;
+      rounds?: number;
+    }>;
+
+    if (board.length === 0) {
+      console.log("leaderboard:        empty — no rounds scored yet");
+    } else {
+      console.log("leaderboard:");
+      for (const [i, entry] of board.entries()) {
+        const who = entry.name || entry.player || "?";
+        console.log(
+          `  ${i + 1}. ${who} — ${entry.score ?? 0}/${entry.total ?? 0} in ${entry.rounds ?? 0} rounds`,
+        );
+      }
+    }
+  } catch {
+    // An older deployment predates these views. Everything above still applies.
+    console.log("players:            unavailable — this deployment has no player views");
+    console.log("                    (redeploy from contracts/MochiMindValidator.py)");
+  }
+
+  console.log("");
 
   if (registered.length === 0) {
     console.error("No stages are registered on this contract.");
@@ -76,6 +110,12 @@ async function main(): Promise<void> {
       unregistered.push(stageId);
       continue;
     }
+    // Studio allows 30 RPC calls a minute per client, and this loop alone is 20
+    // of them. Without the pause the script reports a rate-limit error as
+    // though the contract were broken, which is exactly the confusion it exists
+    // to prevent.
+    await new Promise((resolve) => setTimeout(resolve, RPC_PACE_MS));
+
     const verdict = String(await read("get_stage_result", [stageId]));
     if (verdict && verdict !== "{}") judged++;
     else unjudged.push(stageId);

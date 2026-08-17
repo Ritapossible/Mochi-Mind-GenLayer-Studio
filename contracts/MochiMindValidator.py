@@ -21,23 +21,37 @@ declared tolerance.
 
 Trust boundary (this is the important part)
 -------------------------------------------
-  Frontend/backend owns : the UI, the blur animation, the score display, the
-                          leaderboard, and *submitting* the player's two picks.
+  Frontend/backend owns : the UI, the blur animation, and *relaying* the
+                          player's signed round to this contract.
   This contract owns    : the stage registry (image URL + candidate colors), the
                           vision judgment over the real image, the validator
-                          comparison rule, and the stored verdict.
+                          comparison rule, the stored verdict, **who played the
+                          round**, and **every score on the leaderboard**.
   External source owns  : the raw PNG bytes, which every validator re-fetches
                           and re-examines independently.
 
-The caller supplies ONLY `stage_id` and the player's two picks. It cannot supply
-the image, the candidate colors, dominance weights, or the answer. Those live
-on-chain, registered by the owner, and the verdict is derived from the actual
-image pixels by a vision model at judgment time.
+The caller supplies ONLY `stage_id`, the player's two picks, and a signature
+proving which player made them. It cannot supply the image, the candidate
+colors, dominance weights, the answer, or a score.
 
-This is a deliberate correction of an earlier design in which the client passed
-`dominance_scores` into the contract. That was not consensus — the client had
-already computed the answer and the contract only sorted the numbers it was
-handed. See `contracts/README.md` for the full before/after.
+Two earlier design corrections are recorded here because they are the whole
+point of the contract's shape:
+
+1. The client used to pass `dominance_scores` into `submit_pick`. That was not
+   consensus — the client had already computed the answer and the contract only
+   sorted the numbers it was handed. Dominance is now measured from the image
+   pixels by a vision model at judgment time.
+
+2. The round was correct but the *player* was not. Every transaction was signed
+   by one shared server key, so `gl.message.sender_address` was the relayer on
+   every round, identity was a name typed into a browser, and the leaderboard
+   was a table of client-submitted scores. Now each round carries the player's
+   own secp256k1 signature over (domain, player, stage, picks, nonce, name),
+   verified in this contract (`_recover_signer`), replay-protected by a
+   per-player nonce, and the score is derived here from the rounds themselves —
+   the relayer pays the gas and can do nothing else.
+
+See `contracts/README.md` for the full before/after.
 """
 
 from genlayer import *
@@ -83,6 +97,18 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 JPEG_MAGIC = b"\xff\xd8\xff"
 
 
+# ── Player identity ───────────────────────────────────────────────────────────
+
+# Signed into every round so a signature made for one game can never be replayed
+# into another. Bump it if the message layout below ever changes.
+SIGNING_DOMAIN = "MochiMind v2"
+
+MAX_NAME = 32
+# A stage id has to fit in the solved-stages bitmask, which is what the on-chain
+# score is counted from.
+MAX_STAGE_ID = 255
+
+
 class MochiMindValidator(gl.Contract):
     # ── Storage ───────────────────────────────────────────────────────────────
     owner: Address
@@ -102,6 +128,13 @@ class MochiMindValidator(gl.Contract):
 
     # Most recent verdict, kept as a convenience read for the game client.
     last_result: str
+
+    # ── Competitive state ─────────────────────────────────────────────────────
+    # Keyed by lowercase player address. Every value in here is derived from
+    # rounds this contract scored itself — nothing is ever submitted as a score.
+    player_stats: TreeMap[str, str]
+    player_nonces: TreeMap[str, u256]
+    player_ids: DynArray[str]
 
     def __init__(self) -> None:
         self.owner = gl.message.sender_address
@@ -210,16 +243,65 @@ class MochiMindValidator(gl.Contract):
         self._store_verdict(sid, verdict)
 
     @gl.public.write
-    def submit_pick(self, stage_id: int, player_picks: list[str]) -> None:
-        """Play one round: score the player's two picks against the contract's verdict.
+    def submit_pick(
+        self,
+        stage_id: int,
+        player_picks: list[str],
+        player_id: str,
+        player_name: str,
+        nonce: int,
+        signature: str,
+    ) -> None:
+        """Play one round as `player_id`, and score it on-chain.
 
-        Uses the cached verdict for the stage if one exists, otherwise runs a
-        consensus round first. The player supplies only their guess.
+        Authentication
+        --------------
+        The transaction is normally sent by a relayer that pays the gas so the
+        player needs no wallet. That means `gl.message.sender_address` says
+        nothing about who played, so the round carries the player's own
+        signature instead:
+
+            keccak256("\\x19Ethereum Signed Message:\\n" + len(msg) + msg)
+
+        over the canonical message built by `_round_message`. The address
+        recovered from that signature must equal `player_id`, and `nonce` must
+        be strictly greater than the last nonce that player used — so the
+        relayer can neither forge a round for someone else, alter the picks of a
+        round it is relaying, nor replay one it has already relayed.
+
+        The nonce is strictly-increasing rather than a counter the client has to
+        match exactly, because rounds are relayed fire-and-forget: a cold stage
+        takes 60–120 s to execute and the browser has moved on long before the
+        transaction lands. A client that had to predict its own next counter
+        value would deadlock itself. Clients use a millisecond timestamp.
+
+        A player who signs the transaction with their own account is
+        authenticated by the chain itself; in that case `player_id` must equal
+        the sender and the signature is not required.
+
+        Scoring
+        -------
+        The player's picks are compared here against the consensus verdict, and
+        the result is folded into their on-chain record. `solved_mask` has one
+        bit per stage, so replaying a stage cannot inflate a score.
         """
         sid = self._stage_key(stage_id)
         image_url, options = self._load_spec(sid)
 
         picks = self._clean_picks(player_picks, options)
+        pid = self._clean_player_id(player_id)
+        name = self._clean_name(player_name)
+
+        if nonce < 0:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} nonce must be non-negative, got {nonce}")
+        last_nonce = int(self.player_nonces.get(pid, u256(0)))
+        if int(nonce) <= last_nonce:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} nonce {int(nonce)} was already used by {pid} "
+                f"(last {last_nonce}) — this round is a replay"
+            )
+
+        auth = self._authenticate(pid, int(stage_id), picks, name, int(nonce), signature)
 
         cached = self.verdicts.get(sid, "")
         if cached != "":
@@ -230,21 +312,31 @@ class MochiMindValidator(gl.Contract):
 
         final_colors = verdict.get("final_colors", [])
         ai_colors = verdict.get("ai_colors", final_colors)
+        player_correct = set(picks) == set(final_colors)
+        ai_correct = set(ai_colors) == set(final_colors)
 
+        round_number = int(self.round_count) + 1
         record = {
-            "round": int(self.round_count) + 1,
+            "round": round_number,
             "stage_id": int(stage_id),
-            "player": gl.message.sender_address.as_hex,
+            "player": pid,
+            "player_name": name,
+            "relayer": _sender_hex(),
+            "auth": auth,
+            "nonce": int(nonce),
             "player_picks": picks,
             "final_colors": final_colors,
             "ai_colors": ai_colors,
-            "player_correct": set(picks) == set(final_colors),
-            "ai_correct": set(ai_colors) == set(final_colors),
+            "player_correct": player_correct,
+            "ai_correct": ai_correct,
             "confidence": verdict.get("confidence", 0.0),
             "image_sha256": verdict.get("image_sha256", ""),
         }
         self.rounds.append(json.dumps(record, sort_keys=True))
-        self.round_count = u256(int(self.round_count) + 1)
+        self.round_count = u256(round_number)
+
+        self.player_nonces[pid] = u256(int(nonce))
+        self._record_result(pid, name, int(stage_id), player_correct, ai_correct, round_number)
 
     # ── Reads ─────────────────────────────────────────────────────────────────
 
@@ -259,6 +351,41 @@ class MochiMindValidator(gl.Contract):
     @gl.public.view
     def get_stage(self, stage_id: int) -> str:
         return str(self.stage_specs.get(self._stage_key(stage_id), ""))
+
+    @gl.public.view
+    def get_stage_evidence(self, stage_id: int) -> str:
+        """Everything a client needs to prove it is showing the judged image.
+
+        The game does not get to decide what the player is looking at. It asks
+        for the evidence this contract registered — the URL the validators
+        fetched — and, once a verdict exists, the SHA-256 of the exact bytes
+        they judged. A client that renders anything whose digest differs is
+        rendering something the contract never saw.
+        """
+        sid = self._stage_key(stage_id)
+        raw = self.stage_specs.get(sid, "")
+        if raw == "":
+            return json.dumps({"stage_id": int(stage_id), "registered": False}, sort_keys=True)
+
+        spec = json.loads(str(raw))
+        evidence = {
+            "stage_id": int(stage_id),
+            "registered": True,
+            "image_url": str(spec["image_url"]),
+            "options": [str(o) for o in spec["options"]],
+            "image_sha256": "",
+            "image_bytes": 0,
+            "judged": False,
+        }
+
+        verdict_raw = self.verdicts.get(sid, "")
+        if verdict_raw != "":
+            verdict = json.loads(str(verdict_raw))
+            evidence["image_sha256"] = str(verdict.get("image_sha256", ""))
+            evidence["image_bytes"] = int(verdict.get("image_bytes", 0))
+            evidence["judged"] = True
+
+        return json.dumps(evidence, sort_keys=True)
 
     @gl.public.view
     def get_registered_stages(self) -> str:
@@ -277,6 +404,64 @@ class MochiMindValidator(gl.Contract):
     @gl.public.view
     def get_owner(self) -> str:
         return self.owner.as_hex
+
+    @gl.public.view
+    def get_player_nonce(self, player_id: str) -> int:
+        """The last nonce this player used. The next round must sign a greater one."""
+        return int(self.player_nonces.get(self._clean_player_id(player_id), u256(0)))
+
+    @gl.public.view
+    def get_player(self, player_id: str) -> str:
+        """One player's record, derived entirely from rounds this contract scored."""
+        pid = self._clean_player_id(player_id)
+        raw = self.player_stats.get(pid, "")
+        if raw == "":
+            return json.dumps(
+                _empty_stats(pid, int(self.player_nonces.get(pid, u256(0))), len(self.stage_ids)),
+                sort_keys=True,
+            )
+        stats = json.loads(str(raw))
+        stats["nonce"] = int(self.player_nonces.get(pid, u256(0)))
+        stats["total"] = len(self.stage_ids)
+        return json.dumps(stats, sort_keys=True)
+
+    @gl.public.view
+    def get_player_count(self) -> int:
+        return len(self.player_ids)
+
+    @gl.public.view
+    def get_leaderboard(self, limit: int) -> str:
+        """The leaderboard, computed from the round log rather than reported to it.
+
+        Ranked by stages solved, then by fewest rounds spent solving them, then
+        by address so the ordering is total and every node agrees on it.
+        """
+        count = len(self.player_ids)
+        top = count if limit <= 0 or limit > count else int(limit)
+
+        entries = []
+        for pid in self.player_ids:
+            raw = self.player_stats.get(str(pid), "")
+            if raw == "":
+                continue
+            entries.append(json.loads(str(raw)))
+
+        entries.sort(
+            key=lambda e: (
+                -int(e.get("score", 0)),
+                int(e.get("rounds", 0)),
+                str(e.get("player", "")),
+            )
+        )
+
+        total = len(self.stage_ids)
+        board = []
+        for rank, entry in enumerate(entries[:top], start=1):
+            entry["rank"] = rank
+            entry["total"] = total
+            board.append(entry)
+
+        return json.dumps(board, sort_keys=True)
 
     # ── Nondeterministic judgment ─────────────────────────────────────────────
 
@@ -353,6 +538,74 @@ class MochiMindValidator(gl.Contract):
         self.verdicts[sid] = encoded
         self.last_result = encoded
 
+    # ── Player identity and scoring ───────────────────────────────────────────
+
+    def _authenticate(
+        self,
+        pid: str,
+        stage_id: int,
+        picks: list[str],
+        name: str,
+        nonce: int,
+        signature: str,
+    ) -> str:
+        """Prove the round belongs to `pid`. Returns how it was proved."""
+        # A player who paid for their own transaction is already authenticated
+        # by the chain — asking them for a second signature would be theatre.
+        if _sender_hex() == pid:
+            return "sender"
+
+        message = _round_message(pid, stage_id, picks, name, nonce)
+        recovered = _recover_signer(message, signature)
+        if recovered is None:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} malformed signature for {pid} on stage {stage_id}"
+            )
+        if recovered != pid:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} signature does not belong to {pid} (recovered {recovered})"
+            )
+        return "signature"
+
+    def _record_result(
+        self,
+        pid: str,
+        name: str,
+        stage_id: int,
+        player_correct: bool,
+        ai_correct: bool,
+        round_number: int,
+    ) -> None:
+        raw = self.player_stats.get(pid, "")
+        if raw == "":
+            stats = _empty_stats(pid, 0, len(self.stage_ids))
+            self.player_ids.append(pid)
+        else:
+            stats = json.loads(str(raw))
+
+        bit = 1 << stage_id
+        solved = int(stats.get("solved_mask", 0))
+        ai_solved = int(stats.get("ai_solved_mask", 0))
+        if player_correct:
+            solved |= bit
+        if ai_correct:
+            ai_solved |= bit
+
+        stats["name"] = name
+        stats["player"] = pid
+        stats["solved_mask"] = solved
+        stats["ai_solved_mask"] = ai_solved
+        # One bit per stage: replaying a stage you already solved cannot raise
+        # your score, so a score is "stages solved", not "correct answers given".
+        stats["score"] = _popcount(solved)
+        stats["ai_score"] = _popcount(ai_solved)
+        stats["rounds"] = int(stats.get("rounds", 0)) + 1
+        stats["last_round"] = round_number
+        stats["last_stage"] = stage_id
+        stats["total"] = len(self.stage_ids)
+
+        self.player_stats[pid] = json.dumps(stats, sort_keys=True)
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _only_owner(self) -> None:
@@ -371,6 +624,10 @@ class MochiMindValidator(gl.Contract):
             raise gl.vm.UserError(
                 f"{ERROR_EXPECTED} stage_id must be non-negative, got {stage_id}"
             )
+        if stage_id > MAX_STAGE_ID:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} stage_id must be <= {MAX_STAGE_ID}, got {stage_id}"
+            )
         return u256(stage_id)
 
     def _load_spec(self, sid: u256) -> tuple[str, list[str]]:
@@ -388,6 +645,9 @@ class MochiMindValidator(gl.Contract):
                 raise gl.vm.UserError(f"{ERROR_EXPECTED} empty color name")
             if name in names:
                 raise gl.vm.UserError(f"{ERROR_EXPECTED} duplicate color: {name}")
+            if "|" in name or "\n" in name:
+                # Color names go into the signed round message field-by-field.
+                raise gl.vm.UserError(f"{ERROR_EXPECTED} illegal character in color: {name}")
             names.append(name)
         if len(names) < MIN_OPTIONS or len(names) > MAX_OPTIONS:
             raise gl.vm.UserError(
@@ -409,6 +669,32 @@ class MochiMindValidator(gl.Contract):
                 f"{ERROR_EXPECTED} need exactly {PICKS_PER_ROUND} picks, got {len(picks)}"
             )
         return picks
+
+    def _clean_player_id(self, player_id: str) -> str:
+        """Normalize an address to lowercase 0x-hex — the form signatures recover to."""
+        pid = str(player_id).strip().lower()
+        if not pid.startswith("0x") or len(pid) != 42:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} player_id must be a 0x address: {player_id}")
+        for ch in pid[2:]:
+            if ch not in "0123456789abcdef":
+                raise gl.vm.UserError(
+                    f"{ERROR_EXPECTED} player_id is not hexadecimal: {player_id}"
+                )
+        return pid
+
+    def _clean_name(self, player_name: str) -> str:
+        name = str(player_name).strip()
+        if name == "":
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} player_name must not be empty")
+        if len(name) > MAX_NAME:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} player_name must be <= {MAX_NAME} characters"
+            )
+        if "\n" in name or "\r" in name:
+            # The name is a line in the signed message. A newline inside it
+            # would let a player forge the fields that follow.
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} player_name must be a single line")
+        return name
 
 
 # ── Module-level pure helpers ─────────────────────────────────────────────────
@@ -448,10 +734,42 @@ def _fetch_image(url: str) -> bytes:
     return body
 
 
+def _sender_hex() -> str:
+    """The transaction sender as lowercase 0x-hex, the form addresses compare in.
+
+    `as_hex` is checksummed, and nothing guarantees it carries the 0x prefix, so
+    both are normalized rather than assumed — a mismatch here would silently
+    send a self-sent round down the signature path instead of recognising the
+    sender, and would write a differently-formatted address into the audit log.
+    """
+    raw = str(gl.message.sender_address.as_hex).strip().lower()
+    return raw if raw.startswith("0x") else "0x" + raw
+
+
 def _sha256(data: bytes) -> str:
     if not _HAS_HASHLIB:
         return ""
     return hashlib.sha256(data).hexdigest()
+
+
+def _popcount(mask: int) -> int:
+    return bin(int(mask)).count("1")
+
+
+def _empty_stats(pid: str, nonce: int, total: int) -> dict:
+    return {
+        "player": pid,
+        "name": "",
+        "solved_mask": 0,
+        "ai_solved_mask": 0,
+        "score": 0,
+        "ai_score": 0,
+        "rounds": 0,
+        "last_round": 0,
+        "last_stage": 0,
+        "nonce": nonce,
+        "total": total,
+    }
 
 
 def _coerce_pct(raw) -> float:
@@ -617,3 +935,248 @@ def _handle_leader_error(leaders_res, leader_fn) -> bool:
         return False
     except Exception:
         return False
+
+
+# ── Signed rounds: message, keccak-256, secp256k1 recovery ────────────────────
+#
+# All of this is plain deterministic Python running outside any nondeterministic
+# block, so every validator computes the same address from the same signature.
+#
+# There is no ecrecover host function to call, so the two primitives Ethereum
+# signing needs are implemented here: keccak-256 (which is *not* hashlib's
+# sha3_256 — different padding) and secp256k1 public-key recovery. They are
+# exercised against signatures produced by the browser client in
+# `contracts/tests/test_signed_rounds.py`.
+
+
+def _round_message(pid: str, stage_id: int, picks: list[str], name: str, nonce: int) -> str:
+    """The exact text the player signs. The client builds this byte-for-byte.
+
+    One field per line, in a fixed order, with the domain first so a signature
+    made for MochiMind cannot be lifted into another application. Newlines and
+    "|" are rejected inside names and color names, so no field can impersonate
+    another.
+    """
+    return (
+        f"{SIGNING_DOMAIN}\n"
+        f"player:{pid}\n"
+        f"stage:{stage_id}\n"
+        f"picks:{'|'.join(picks)}\n"
+        f"nonce:{nonce}\n"
+        f"name:{name}"
+    )
+
+
+_KECCAK_RC = [
+    0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
+    0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+    0x000000000000008A, 0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+    0x000000008000808B, 0x800000000000008B, 0x8000000000008089, 0x8000000000008003,
+    0x8000000000008002, 0x8000000000000080, 0x000000000000800A, 0x800000008000000A,
+    0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+]
+
+_KECCAK_ROT = [
+    [0, 36, 3, 41, 18],
+    [1, 44, 10, 45, 2],
+    [62, 6, 43, 15, 61],
+    [28, 55, 25, 21, 56],
+    [27, 20, 39, 8, 14],
+]
+
+_MASK64 = (1 << 64) - 1
+_KECCAK_RATE = 136  # bytes absorbed per permutation for keccak-256
+
+
+def _rotl64(value: int, shift: int) -> int:
+    shift %= 64
+    if shift == 0:
+        return value & _MASK64
+    return ((value << shift) | (value >> (64 - shift))) & _MASK64
+
+
+def _keccak_f(state: list) -> None:
+    for rnd in range(24):
+        # theta
+        c = [
+            state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20]
+            for x in range(5)
+        ]
+        d = [c[(x - 1) % 5] ^ _rotl64(c[(x + 1) % 5], 1) for x in range(5)]
+        for x in range(5):
+            for y in range(5):
+                state[x + 5 * y] ^= d[x]
+
+        # rho + pi
+        b = [0] * 25
+        for x in range(5):
+            for y in range(5):
+                b[y + 5 * ((2 * x + 3 * y) % 5)] = _rotl64(state[x + 5 * y], _KECCAK_ROT[x][y])
+
+        # chi
+        for x in range(5):
+            for y in range(5):
+                state[x + 5 * y] = b[x + 5 * y] ^ (
+                    (~b[(x + 1) % 5 + 5 * y] & _MASK64) & b[(x + 2) % 5 + 5 * y]
+                )
+
+        # iota
+        state[0] ^= _KECCAK_RC[rnd]
+
+
+def _keccak256(data: bytes) -> bytes:
+    """Keccak-256 as Ethereum uses it: pad10*1 with the 0x01 domain byte."""
+    state = [0] * 25
+
+    padded = bytearray(data)
+    padded.append(0x01)
+    while len(padded) % _KECCAK_RATE != 0:
+        padded.append(0x00)
+    padded[-1] ^= 0x80
+
+    for offset in range(0, len(padded), _KECCAK_RATE):
+        block = padded[offset:offset + _KECCAK_RATE]
+        for i in range(_KECCAK_RATE // 8):
+            state[i] ^= int.from_bytes(bytes(block[i * 8:i * 8 + 8]), "little")
+        _keccak_f(state)
+
+    out = bytearray()
+    for i in range(4):  # 4 lanes = 32 bytes of output
+        out += state[i].to_bytes(8, "little")
+    return bytes(out)
+
+
+_SECP256K1_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP256K1_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+_SECP256K1_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+
+
+def _jac_double(pt):
+    """Point doubling in Jacobian coordinates — no modular inverse per step."""
+    x, y, z = pt
+    if y == 0 or z == 0:
+        return (0, 0, 0)
+    ysq = (y * y) % _SECP256K1_P
+    s = (4 * x * ysq) % _SECP256K1_P
+    m = (3 * x * x) % _SECP256K1_P  # a = 0 on secp256k1, so no a*z^4 term
+    nx = (m * m - 2 * s) % _SECP256K1_P
+    ny = (m * (s - nx) - 8 * ysq * ysq) % _SECP256K1_P
+    nz = (2 * y * z) % _SECP256K1_P
+    return (nx, ny, nz)
+
+
+def _jac_add(p1, p2):
+    if p1[2] == 0:
+        return p2
+    if p2[2] == 0:
+        return p1
+
+    x1, y1, z1 = p1
+    x2, y2, z2 = p2
+    z1z1 = (z1 * z1) % _SECP256K1_P
+    z2z2 = (z2 * z2) % _SECP256K1_P
+    u1 = (x1 * z2z2) % _SECP256K1_P
+    u2 = (x2 * z1z1) % _SECP256K1_P
+    s1 = (y1 * z2 * z2z2) % _SECP256K1_P
+    s2 = (y2 * z1 * z1z1) % _SECP256K1_P
+
+    if u1 == u2:
+        if s1 != s2:
+            return (0, 0, 0)  # P + (-P) = infinity
+        return _jac_double(p1)
+
+    h = (u2 - u1) % _SECP256K1_P
+    r = (s2 - s1) % _SECP256K1_P
+    hh = (h * h) % _SECP256K1_P
+    hhh = (h * hh) % _SECP256K1_P
+    u1hh = (u1 * hh) % _SECP256K1_P
+    nx = (r * r - hhh - 2 * u1hh) % _SECP256K1_P
+    ny = (r * (u1hh - nx) - s1 * hhh) % _SECP256K1_P
+    nz = (h * z1 * z2) % _SECP256K1_P
+    return (nx, ny, nz)
+
+
+def _jac_mul(pt, k: int):
+    k %= _SECP256K1_N
+    result = (0, 0, 0)
+    addend = pt
+    while k:
+        if k & 1:
+            result = _jac_add(result, addend)
+        addend = _jac_double(addend)
+        k >>= 1
+    return result
+
+
+def _to_affine(pt):
+    x, y, z = pt
+    if z == 0:
+        return None
+    zinv = pow(z, _SECP256K1_P - 2, _SECP256K1_P)  # Fermat inverse, one per recovery
+    zinv2 = (zinv * zinv) % _SECP256K1_P
+    return ((x * zinv2) % _SECP256K1_P, (y * zinv2 % _SECP256K1_P * zinv) % _SECP256K1_P)
+
+
+def _ecrecover(msg_hash: bytes, signature: bytes):
+    """Recover the signing address from a 65-byte (r, s, v) signature.
+
+    Returns lowercase 0x-hex, or None if the signature is malformed, off-curve,
+    or high-s. Rejecting high-s matters: without it the same round could be
+    replayed under a second, equally valid signature.
+    """
+    if len(signature) != 65:
+        return None
+
+    r = int.from_bytes(signature[0:32], "big")
+    s = int.from_bytes(signature[32:64], "big")
+    v = signature[64]
+    if v >= 27:
+        v -= 27
+    if v != 0 and v != 1:
+        return None
+    if r <= 0 or r >= _SECP256K1_N or s <= 0 or s >= _SECP256K1_N:
+        return None
+    if s > _SECP256K1_N // 2:  # EIP-2 low-s only
+        return None
+
+    # Rebuild R from its x coordinate: y^2 = x^3 + 7, pick the root whose parity
+    # matches the recovery id.
+    alpha = (pow(r, 3, _SECP256K1_P) + 7) % _SECP256K1_P
+    beta = pow(alpha, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
+    if (beta * beta) % _SECP256K1_P != alpha:
+        return None  # x was not on the curve
+    y = beta if (beta % 2 == v % 2) else (_SECP256K1_P - beta) % _SECP256K1_P
+
+    # Q = r^-1 (sR - eG)
+    e = int.from_bytes(msg_hash, "big") % _SECP256K1_N
+    point = _jac_add(
+        _jac_mul((r, y, 1), s),
+        _jac_mul((_SECP256K1_GX, _SECP256K1_GY, 1), (_SECP256K1_N - e) % _SECP256K1_N),
+    )
+    point = _jac_mul(point, pow(r, _SECP256K1_N - 2, _SECP256K1_N))
+
+    affine = _to_affine(point)
+    if affine is None:
+        return None
+
+    px, py = affine
+    digest = _keccak256(px.to_bytes(32, "big") + py.to_bytes(32, "big"))
+    return "0x" + digest[12:].hex()
+
+
+def _recover_signer(message: str, signature_hex: str):
+    """Recover the address that produced an EIP-191 `personal_sign` signature."""
+    text = str(signature_hex).strip()
+    if text.startswith("0x") or text.startswith("0X"):
+        text = text[2:]
+    if len(text) != 130:
+        return None
+    try:
+        raw = bytes.fromhex(text)
+    except ValueError:
+        return None
+
+    body = message.encode("utf-8")
+    prefix = b"\x19Ethereum Signed Message:\n" + str(len(body)).encode("ascii")
+    return _ecrecover(_keccak256(prefix + body), raw)
