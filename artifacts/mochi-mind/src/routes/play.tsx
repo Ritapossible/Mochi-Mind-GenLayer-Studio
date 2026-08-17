@@ -77,10 +77,28 @@ function PlayPage() {
   // The candidate colors come from the contract's stage registry when it can be
   // read: those are the only names `submit_pick` will accept, so offering
   // anything else would be offering a pick that cannot be played.
-  const options = useMemo(
-    () => (evidence?.options?.length ? evidence.options.map(swatchFor) : stage.options),
-    [evidence, stage],
-  );
+  const options = useMemo(() => {
+    const registered = evidence?.options;
+    if (!registered?.length) return stage.options;
+
+    const local = stage.options.map((o) => o.name);
+    const sameColors =
+      registered.length === local.length && registered.every((name) => local.includes(name));
+
+    // Same four colors, different order: keep the order already on screen.
+    //
+    // The contract stores them as registered — [correct, correct, decoy, decoy]
+    // — while the game shows a seeded shuffle. Adopting the registered order
+    // meant the grid rearranged itself a second into the round, and rearranged
+    // into the one order that gives the answer away: the first two swatches were
+    // always the correct pair. Order is display only; `submit_pick` matches on
+    // names, so nothing about the round depends on it.
+    if (sameColors) return stage.options;
+
+    // Genuinely different colors on-chain — those are the only names the
+    // contract will accept, so show them and let the palette fill in the rest.
+    return registered.map(swatchFor);
+  }, [evidence, stage]);
 
   function resetStage() {
     setPhase("playing");
