@@ -13,6 +13,16 @@
 // was handing the contract a pre-computed answer and the contract was only
 // sorting it. The contract now derives dominance from the image itself.
 
+// The `correct` pairs below were reconciled against the deployed contract's
+// cached verdicts (`get_stage_result(id).final_colors`) on 2026-08-18, so an
+// offline round scores a stage the same way an online one does. Seven stages
+// disagreed and were corrected: 4, 5, 9, 10, 12, 13 and 19. If a stage is ever
+// re-analyzed on-chain, re-read the verdicts and reconcile again.
+//
+// Only which two of a stage's four names are `correct` ever changes here. The
+// set of four is what is registered on-chain and what `submit_pick` accepts, so
+// swapping a name in or out would desync this file from the deployment.
+
 export type ColorSwatch = {
   name: string;
   hex: string;
@@ -104,25 +114,25 @@ export const STAGES: Stage[] = [
   mk(1, "Sunrise Mochi", "Warm light over the horizon.", ["Yellow", "Orange"], ["Pink", "Red"], 1),
   mk(2, "Forest Mochi", "Hidden in the canopy.", ["Green", "Brown"], ["Yellow", "Blue"], 1),
   mk(3, "Ocean Mochi", "Cool currents below the surface.", ["Blue", "Cyan"], ["White", "Green"], 1),
-  mk(4, "Candy Mochi", "Soft, sweet and unmistakable.", ["Pink", "White"], ["Purple", "Cyan"], 2),
-  mk(5, "Ember Mochi", "Sparks before the flame.", ["Red", "Orange"], ["Brown", "Yellow"], 2,
+  mk(4, "Candy Mochi", "Soft, sweet and unmistakable.", ["Purple", "White"], ["Pink", "Cyan"], 2),
+  mk(5, "Ember Mochi", "Sparks before the flame.", ["Red", "Brown"], ["Orange", "Yellow"], 2,
     "I change more than you think…"),
   mk(6, "Royal Mochi", "Crowned in twilight.", ["Purple", "Gold"], ["Blue", "Silver"], 2),
   mk(7, "Storm Mochi", "Rain on cold steel.", ["Gray", "Blue"], ["White", "Black"], 3),
   mk(8, "Toxic Mochi", "Glow from the deep.", ["Neon Green", "Black"], ["Yellow", "Purple"], 3),
-  mk(9, "Sakura Mochi", "Petals dipped in fire.", ["Pink", "Red"], ["White", "Magenta"], 3),
-  mk(10, "Arctic Mochi", "Breath on a winter pane.", ["White", "Cyan"], ["Blue", "Silver"], 3,
+  mk(9, "Sakura Mochi", "Petals dipped in fire.", ["White", "Pink"], ["Red", "Magenta"], 3),
+  mk(10, "Arctic Mochi", "Breath on a winter pane.", ["Cyan", "Blue"], ["White", "Silver"], 3,
     "Can you still see me clearly?"),
   mk(11, "Shadow Mochi", "Mystery walks at night.", ["Black", "Purple"], ["Blue", "Gray"], 4),
-  mk(12, "Cosmic Mochi", "Born among the stars.", ["Indigo", "Silver"], ["Purple", "Blue"], 4),
-  mk(13, "Glitch Mochi", "Tokyo at 3 AM.", ["Pink", "Cyan"], ["White", "Magenta"], 4),
+  mk(12, "Cosmic Mochi", "Born among the stars.", ["Silver", "Purple"], ["Indigo", "Blue"], 4),
+  mk(13, "Glitch Mochi", "Tokyo at 3 AM.", ["Pink", "White"], ["Cyan", "Magenta"], 4),
   mk(14, "Desert Mochi", "Sand kissed by the sun.", ["Beige", "Gold"], ["Orange", "Brown"], 4),
   mk(15, "Crystal Mochi", "Pure light, refracted.", ["White", "Silver"], ["Cyan", "Lavender"], 4,
     "Not every form hides the truth…"),
   mk(16, "Voltage Mochi", "Thunder in a bottle.", ["Electric Blue", "Yellow"], ["White", "Cyan"], 5),
   mk(17, "Eclipse Mochi", "When light meets dark.", ["Black", "White"], ["Purple", "Gray"], 5),
   mk(18, "Genesis Mochi", "First whisper of morning.", ["Lavender", "White"], ["Blue", "Pink"], 5),
-  mk(19, "Proto Mochi", "Almost remembered.", ["Purple", "Silver"], ["White", "Indigo"], 5,
+  mk(19, "Proto Mochi", "Almost remembered.", ["Silver", "Indigo"], ["Purple", "White"], 5,
     "You've almost remembered…"),
   mk(20, "True Mochi", "Don't forget my true colors.", ["Purple", "White"], ["Blue", "Lavender"], 5,
     "My true colors were always Purple and White."),

@@ -53,9 +53,14 @@ function Index() {
               <Trophy className="size-3.5" /> Leaderboard
             </Link>
           </div>
-          <Button variant="hero" size="sm" className="rounded-full px-5" asChild>
-            <Link to="/play">Play Now</Link>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="glass" size="sm" className="rounded-full px-3 md:hidden" asChild>
+              <Link to="/leaderboard" aria-label="Leaderboard"><Trophy className="size-4" /></Link>
+            </Button>
+            <Button variant="hero" size="sm" className="rounded-full px-5" asChild>
+              <Link to="/play">Play Now</Link>
+            </Button>
+          </div>
         </div>
       </nav>
 
@@ -84,6 +89,9 @@ function Index() {
             <div className="flex flex-wrap gap-4">
               <Button variant="hero" size="xl" className="rounded-full" asChild>
                 <Link to="/play"><Play className="size-5" /> Play Now</Link>
+              </Button>
+              <Button variant="glass" size="xl" className="rounded-full" asChild>
+                <Link to="/leaderboard"><Trophy className="size-5" /> Leaderboard</Link>
               </Button>
               <Button variant="glass" size="xl" className="rounded-full" asChild>
                 <a href="#how">How It Works <ArrowRight className="size-5" /></a>
@@ -211,9 +219,14 @@ function Index() {
         <h2 className="text-5xl md:text-7xl font-black tracking-tight mb-8">
           The blur is <span className="text-gradient">waiting.</span>
         </h2>
-        <Button variant="hero" size="xl" className="rounded-full px-12" asChild>
-          <Link to="/play"><Play className="size-5" /> Play Now</Link>
-        </Button>
+        <div className="flex flex-wrap items-center justify-center gap-4">
+          <Button variant="hero" size="xl" className="rounded-full px-12" asChild>
+            <Link to="/play"><Play className="size-5" /> Play Now</Link>
+          </Button>
+          <Button variant="glass" size="xl" className="rounded-full px-10" asChild>
+            <Link to="/leaderboard"><Trophy className="size-5" /> Leaderboard</Link>
+          </Button>
+        </div>
         <p className="mt-10 text-muted-foreground italic">No matter how Mochi changes… true colors remain.</p>
       </section>
 
